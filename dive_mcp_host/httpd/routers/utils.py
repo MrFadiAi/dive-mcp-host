@@ -16,6 +16,7 @@ from uuid import uuid4
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import (
     AIMessage,
+    AIMessageChunk,
     BaseMessage,
     HumanMessage,
     SystemMessage,
@@ -26,6 +27,23 @@ from langchain_core.output_parsers import StrOutputParser
 from openai import APIError as OpenAIAPIError
 from pydantic import BaseModel
 from starlette.datastructures import State
+
+# Monkey-patch LangChain's _convert_delta_to_message_chunk to capture reasoning_content
+# from GLM-5, DeepSeek and other models that return thinking in a separate field.
+# Without this patch, reasoning_content is silently dropped and the chat appears empty.
+import langchain_openai.chat_models.base as _lc_openai_base
+
+_original_convert_delta_to_message_chunk = _lc_openai_base._convert_delta_to_message_chunk
+
+
+def _patched_convert_delta_to_message_chunk(_dict, default_class):
+    result = _original_convert_delta_to_message_chunk(_dict, default_class)
+    if isinstance(result, AIMessageChunk) and _dict.get("reasoning_content"):
+        result.additional_kwargs["reasoning_content"] = _dict["reasoning_content"]
+    return result
+
+
+_lc_openai_base._convert_delta_to_message_chunk = _patched_convert_delta_to_message_chunk
 
 from dive_mcp_host.host.agents.file_in_additional_kwargs import (
     DOCUMENTS_KEY,
@@ -355,6 +373,11 @@ class ChatProcessor:
             if app.model_config_manager.full_config
             else False
         )
+        self.guide_mode = (
+            app.model_config_manager.full_config.guide_mode
+            if app.model_config_manager.full_config
+            else False
+        )
         self.enable_local_tools = (
             app.model_config_manager.full_config.enable_local_tools
             if app.model_config_manager.full_config
@@ -367,6 +390,7 @@ class ChatProcessor:
         chat_id: str | None,
         query_input: QueryInput | None,
         regenerate_message_id: str | None,
+        chat_instructions: str | None = None,
     ) -> tuple[str, TokenUsage]:
         """Handle chat."""
         logger.debug(
@@ -458,6 +482,7 @@ class ChatProcessor:
                 chat_id,
                 query_message,
                 is_resend=regenerate_message_id is not None,
+                chat_instructions=chat_instructions,
                 start_time=start,
             )
         except Exception as exc:
@@ -733,6 +758,7 @@ class ChatProcessor:
         tools: list | None = None,
         is_resend: bool = False,
         start_time: float | None = None,
+        chat_instructions: str | None = None,
     ) -> tuple[HumanMessage, AIMessage, list[BaseMessage], float]:
         messages = [*history] if history else []
 
@@ -761,6 +787,15 @@ class ChatProcessor:
             PromptKey.SYSTEM
         ):
             prompt = system_prompt
+
+        # Append guide mode instructions to whatever prompt was selected
+        if self.guide_mode and isinstance(prompt, str):
+            from dive_mcp_host.httpd.conf.system_prompt import guide_mode_instructions
+            prompt = prompt + guide_mode_instructions()
+
+        # Append per-chat instructions if provided
+        if chat_instructions and isinstance(prompt, str):
+            prompt = prompt + "\n\n<Chat_Specific_Instructions>\n" + chat_instructions + "\n</Chat_Specific_Instructions>"
 
         chat = self.dive_host.chat(
             chat_id=chat_id,
@@ -793,12 +828,19 @@ class ChatProcessor:
         content = await self._content_handler.invoke(message)
         if content:
             await self.stream.write(StreamMessage(type="text", content=content))
-        if message.response_metadata.get("stop_reason") == "max_tokens":
+        # Check for truncation — different providers use different keys/values:
+        #   OpenAI: finish_reason="length"
+        #   GLM:    finish_reason="length"
+        #   Bedrock: stop_reason="max_tokens"
+        #   Anthropic: stop_reason="max_tokens"
+        stop = message.response_metadata.get("finish_reason") or message.response_metadata.get("stop_reason")
+        if stop in ("length", "max_tokens"):
             await self.stream.write(
                 StreamMessage(
                     type="error",
                     content=ErrorContent(
-                        message="stop_reason: max_tokens", type="max_tokens"
+                        message=f"Response truncated ({stop}). Increase max_tokens for longer responses.",
+                        type="max_tokens",
                     ),
                 )
             )
@@ -869,12 +911,36 @@ class ChatProcessor:
             if res_type == "messages":
                 message, _ = res_content
                 if isinstance(message, AIMessage):
-                    logger.log(TRACE, "got AI message: %s", message.model_dump_json())
+                    # Detect context window / truncation errors
+                    finish = message.response_metadata.get("finish_reason") or message.response_metadata.get("stop_reason")
+                    if finish and finish not in ("stop", None):
+                        logger.warning(
+                            "AI response ended with finish_reason=%s has_content=%s has_reasoning=%s",
+                            finish,
+                            bool(message.content),
+                            bool(message.additional_kwargs.get("reasoning_content")),
+                        )
+                        if finish == "model_context_window_exceeded":
+                            await self.stream.write(
+                                StreamMessage(
+                                    type="error",
+                                    content=ErrorContent(
+                                        message="Context window exceeded. The tool results are too large for the model. Try asking a more specific question that requires fewer tools.",
+                                        type="context_exceeded",
+                                    ),
+                                )
+                            )
                     if message.content:
                         # Record time to first token if not already recorded
                         if time_to_first_token == 0.0:
                             time_to_first_token = time.time() - start_time
                         await self._stream_text_msg(message)
+                    # Stream reasoning/thinking content from GLM-5, DeepSeek models
+                    # These models return thinking in reasoning_content while content is empty
+                    elif reasoning := message.additional_kwargs.get("reasoning_content"):
+                        if time_to_first_token == 0.0:
+                            time_to_first_token = time.time() - start_time
+                        await self.stream.write(StreamMessage(type="text", content=reasoning))
                 elif isinstance(message, ToolMessage):
                     logger.log(TRACE, "got tool message: %s", message.model_dump_json())
                     if message.response_metadata.get(FAKE_TOOL_RESPONSE, False):

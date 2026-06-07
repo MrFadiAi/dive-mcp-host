@@ -335,6 +335,10 @@ class ModelFullConfigs(BaseModel):
     disable_dive_system_prompt: bool = False
     # If True, custom rules will be used directly without extra system prompt from Dive.
 
+    guide_mode: bool = False
+    # If True, the AI provides step-by-step guidance with exact TIA Portal locations
+    # (which FC/FB, which network, which tag table, which DB) instead of just answering.
+
     enable_local_tools: bool = True
     # If True, local tools (fetch, bash, read_file, write_file) will be available
     # to the LLM directly without going through the installer agent.

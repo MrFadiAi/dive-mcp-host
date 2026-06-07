@@ -160,6 +160,9 @@ async def create_chat(
     filepaths: Annotated[
         list[str] | None, Form(description="File paths to upload")
     ] = None,
+    instructions: Annotated[
+        str | None, Form(description="Per-chat instructions to append to system prompt")
+    ] = None,
 ) -> StreamingResponse:
     """Create a new chat."""
     if files is None:
@@ -177,7 +180,7 @@ async def create_chat(
     async def process() -> None:
         async with stream:
             processor = ChatProcessor(app, request.state, stream, SkillManager())
-            await processor.handle_chat(chat_id, query_input, None)
+            await processor.handle_chat(chat_id, query_input, None, chat_instructions=instructions)
 
     stream.add_task(process)
     return response
@@ -236,6 +239,9 @@ async def edit_chat(
     filepaths: Annotated[
         list[str] | None, Form(description="File paths to upload")
     ] = None,
+    instructions: Annotated[
+        str | None, Form(description="Per-chat instructions to append to system prompt")
+    ] = None,
 ) -> StreamingResponse:
     """Edit a message in a chat and query again."""
     if chat_id is None or message_id is None:
@@ -260,7 +266,7 @@ async def edit_chat(
     async def process() -> None:
         async with stream:
             processor = ChatProcessor(app, request.state, stream, SkillManager())
-            await processor.handle_chat(chat_id, query_input, message_id)
+            await processor.handle_chat(chat_id, query_input, message_id, chat_instructions=instructions)
 
     stream.add_task(process)
     return response
@@ -281,6 +287,9 @@ async def retry_chat(
         str | None,
         Body(alias="messageId", description="ID of the message to retry from"),
     ] = None,
+    instructions: Annotated[
+        str | None, Body(description="Per-chat instructions to append to system prompt")
+    ] = None,
 ) -> StreamingResponse:
     """Retry a chat from a specific message."""
     if chat_id is None or message_id is None:
@@ -292,7 +301,7 @@ async def retry_chat(
     async def process() -> None:
         async with stream:
             processor = ChatProcessor(app, request.state, stream, SkillManager())
-            await processor.handle_chat(chat_id, None, message_id)
+            await processor.handle_chat(chat_id, None, message_id, chat_instructions=instructions)
 
     stream.add_task(process)
     return response
