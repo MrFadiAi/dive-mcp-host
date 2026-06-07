@@ -383,6 +383,16 @@ class ChatProcessor:
             if app.model_config_manager.full_config
             else False
         )
+        self.code_languages = (
+            app.model_config_manager.full_config.code_languages
+            if app.model_config_manager.full_config
+            else ["scl"]
+        )
+        self.code_review_mode = (
+            app.model_config_manager.full_config.code_review_mode
+            if app.model_config_manager.full_config
+            else False
+        )
         self.skill_manager = skill_manager
 
     async def handle_chat(
@@ -791,7 +801,12 @@ class ChatProcessor:
         # Append guide mode instructions to whatever prompt was selected
         if self.guide_mode and isinstance(prompt, str):
             from dive_mcp_host.httpd.conf.system_prompt import guide_mode_instructions
-            prompt = prompt + guide_mode_instructions()
+            prompt = prompt + guide_mode_instructions(self.code_languages)
+
+        # Append code review mode instructions if enabled
+        if self.code_review_mode and isinstance(prompt, str):
+            from dive_mcp_host.httpd.conf.system_prompt import code_review_instructions
+            prompt = prompt + code_review_instructions()
 
         # Append per-chat instructions if provided
         if chat_instructions and isinstance(prompt, str):

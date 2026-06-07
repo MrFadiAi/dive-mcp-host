@@ -339,6 +339,14 @@ class ModelFullConfigs(BaseModel):
     # If True, the AI provides step-by-step guidance with exact TIA Portal locations
     # (which FC/FB, which network, which tag table, which DB) instead of just answering.
 
+    code_review_mode: bool = False
+    # If True, the AI reviews every block response against IEC 61131-3 best practices,
+    # checking for missing comments, safety issues, race conditions, and naming conventions.
+
+    code_languages: list[str] = Field(default_factory=lambda: ["scl"])
+    # Preferred PLC code languages: "scl" for complex/math, "stl" for simple logic.
+    # Both can be active simultaneously — the AI picks the best fit per snippet.
+
     enable_local_tools: bool = True
     # If True, local tools (fetch, bash, read_file, write_file) will be available
     # to the LLM directly without going through the installer agent.

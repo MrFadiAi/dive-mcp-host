@@ -147,12 +147,16 @@ def system_prompt(custom_rules: str) -> str:
     return rules_header + core_prompt + rules_footer  # noqa: E501
 
 
-def guide_mode_instructions() -> str:
+def guide_mode_instructions(code_languages: list[str] | None = None) -> str:
     """Generate guide mode instructions to append to the system prompt.
 
     Reads the guide-mode skill from the skills directory and wraps it
     as a system prompt section. Falls back to a minimal inline prompt
     if the skill file is not found.
+
+    Args:
+        code_languages: Preferred PLC code languages (e.g. ["scl", "stl"]).
+            Both can be active — SCL for complex/math, STL for simple logic.
 
     Returns:
         Guide mode instructions string.
@@ -178,4 +182,53 @@ def guide_mode_instructions() -> str:
             "Provide step-by-step instructions for the user to execute manually in TIA Portal."
         )
 
-    return f"<Guide_Mode_Protocol>\n{content}\n</Guide_Mode_Protocol>"
+    # Build code language preference section
+    lang_section = ""
+    if code_languages:
+        lang_names = {
+            "scl": "SCL (Structured Control Language)",
+            "stl": "STL (Statement List)",
+        }
+        selected = [lang_names.get(lang, lang) for lang in code_languages]
+        lang_section = (
+            "\n\n<Code_Language_Preference>\n"
+            f"  The user prefers the following PLC programming languages: {', '.join(selected)}.\n"
+            "  - Use SCL for complex logic, mathematical operations, data processing, and structured programming patterns.\n"
+            "  - Use STL for simple boolean logic, basic I/O operations, and straightforward control sequences.\n"
+            "  - When both are enabled, choose the most appropriate language for each specific code snippet.\n"
+            "</Code_Language_Preference>"
+        )
+
+    return f"<Guide_Mode_Protocol>\n{content}{lang_section}\n</Guide_Mode_Protocol>"
+
+
+def code_review_instructions() -> str:
+    """Generate code review mode instructions to append to the system prompt.
+
+    Reads the code-review-mode skill from the skills directory and wraps it
+    as a system prompt section. Falls back to a minimal inline prompt
+    if the skill file is not found.
+
+    Returns:
+        Code review mode instructions string.
+    """
+    from pathlib import Path
+
+    skill_file = Path(__file__).resolve().parent.parent.parent.parent / "skills" / "code-review-mode" / "SKILL.md"
+
+    try:
+        import frontmatter
+
+        with skill_file.open("r", encoding="utf-8") as f:
+            post = frontmatter.load(f)
+        content = post.content
+    except Exception:
+        logger.warning("Failed to load code-review-mode skill from %s, using fallback", skill_file)
+        content = (
+            "CODE REVIEW MODE IS ACTIVE.\n"
+            "Review every block/code response against IEC 61131-3 best practices.\n"
+            "Check for: missing comments, safety issues, race conditions, naming conventions.\n"
+            "Append a structured review with severity levels (Critical/Warning/Info)."
+        )
+
+    return f"<Code_Review_Mode_Protocol>\n{content}\n</Code_Review_Mode_Protocol>"
