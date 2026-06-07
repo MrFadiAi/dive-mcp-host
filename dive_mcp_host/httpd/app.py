@@ -9,6 +9,7 @@ from dive_mcp_host.httpd.conf.httpd_service import ServiceManager
 from dive_mcp_host.httpd.middlewares import default_state, error_handler
 from dive_mcp_host.httpd.routers.chat import chat
 from dive_mcp_host.httpd.routers.config import config
+from dive_mcp_host.httpd.routers.docs import docs
 from dive_mcp_host.httpd.routers.model_verify import model_verify
 from dive_mcp_host.httpd.routers.openai import openai
 from dive_mcp_host.httpd.routers.skills import skills
@@ -64,7 +65,13 @@ def create_app(
     app.include_router(tools, prefix="/api/tools")
     app.include_router(config, prefix="/api/config")
     app.include_router(skills, prefix="/api/skills")
+    app.include_router(docs, prefix="/api/docs")
     app.include_router(model_verify, prefix="/model_verify")
+
+    # Health check
+    @app.get("/api/ping")
+    async def ping():
+        return {"status": "ok"}
 
     # remote endpoints
     app.include_router(chat, prefix="/api/v1/mcp")
