@@ -104,6 +104,27 @@ def setup_argument_parser() -> type[CLIArgs]:
         help="With given system prompt in the file.",
         dest="prompt_file",
     )
+    parser.add_argument(
+        "--index-docs",
+        type=str,
+        default=None,
+        help="Index documents from a directory for RAG retrieval.",
+        dest="index_docs",
+    )
+    parser.add_argument(
+        "--reindex",
+        action="store_true",
+        default=False,
+        help="Force re-indexing already indexed documents.",
+        dest="reindex",
+    )
+    parser.add_argument(
+        "--list-docs",
+        action="store_true",
+        default=False,
+        help="List all indexed documents.",
+        dest="list_docs",
+    )
     return parser.parse_args(namespace=CLIArgs)
 
 
@@ -226,6 +247,14 @@ async def run() -> None:
 
     args = setup_argument_parser()
 
+    # Handle RAG indexing commands
+    if args.list_docs:
+        await _list_docs(args)
+        return
+    if args.index_docs:
+        await _index_docs(args)
+        return
+
     # Get initial query if provided
     initial_query = parse_query(args) if args.query else None
 
@@ -314,3 +343,163 @@ async def process_query(
             await loading_task
 
     print()  # Add newline after response
+
+
+def _load_embed_config_for_cli(args: type[CLIArgs]) -> tuple:
+    """Load embedding config for CLI RAG commands.
+
+    Returns:
+        Tuple of (base_url, api_key, model, embed_dims) for API mode,
+        or (None, None, model, dims) for local mode.
+    """
+    from dive_mcp_host.httpd.conf.models import ModelManager
+
+    # Determine config path
+    config_path = None
+    if args.config_dir:
+        config_path = str(Path(args.config_dir) / "model_config.json")
+    elif args.model_config_path:
+        config_path = args.model_config_path
+    else:
+        from dive_mcp_host.env import DIVE_CONFIG_DIR
+        default_path = DIVE_CONFIG_DIR / "model_config.json"
+        if default_path.exists():
+            config_path = str(default_path)
+
+    if not config_path or not Path(config_path).exists():
+        print("Model configuration not found. Configure embedding settings first.")
+        sys.exit(1)
+
+    manager = ModelManager(config_path)
+    if not manager.initialize():
+        print("Failed to load model configuration.")
+        sys.exit(1)
+
+    full_config = manager.full_config
+    if not full_config or not full_config.embed_config:
+        print("Embedding model not configured.")
+        print("   Configure it via the app: Settings > Embedding Model")
+        print("   Or via API: POST /api/config/model-embedding")
+        sys.exit(1)
+
+    embed_cfg = full_config.embed_config
+    if not embed_cfg.model:
+        print("Embedding config incomplete: model not set.")
+        sys.exit(1)
+
+    # Local mode: no API key needed
+    if embed_cfg.provider == "local":
+        return None, None, embed_cfg.model, embed_cfg.embed_dims or 0
+
+    # API mode: need api_key
+    if not embed_cfg.api_key:
+        print("Embedding config incomplete (need api_key for non-local providers).")
+        sys.exit(1)
+
+    # Resolve base_url
+    from dive_mcp_host.rag import _resolve_base_url
+
+    active_base_url = None
+    if full_config.active_provider:
+        active_settings = manager.get_settings_by_provider(full_config.active_provider)
+        if active_settings and active_settings.configuration and active_settings.configuration.base_url:
+            active_base_url = active_settings.configuration.base_url
+
+    base_url = _resolve_base_url(
+        embed_base_url=embed_cfg.base_url,
+        active_llm_base_url=active_base_url,
+        provider=embed_cfg.provider,
+    )
+
+    return base_url, embed_cfg.api_key, embed_cfg.model, embed_cfg.embed_dims or 768
+
+
+async def _index_docs(args: type[CLIArgs]) -> None:
+    """Index documents from a directory for RAG retrieval."""
+    from dive_mcp_host.rag.embedder import Embedder, LocalEmbedder
+    from dive_mcp_host.rag.indexer import index_directory
+    from dive_mcp_host.rag.vector_store import DocStore
+
+    doc_dir = Path(args.index_docs)
+    if not doc_dir.exists() or not doc_dir.is_dir():
+        print(f"Directory not found: {doc_dir}")
+        sys.exit(1)
+
+    print(f"Indexing documents from: {doc_dir}")
+
+    # Load embedding config
+    base_url, api_key, model, embed_dims = _load_embed_config_for_cli(args)
+
+    if base_url is None:
+        # Local embedding mode
+        print(f"Local embedding model: {model}")
+        embedder = LocalEmbedder(model_name=model)
+        embed_dims = embedder.dimensions  # auto-detect
+        print(f"  dimensions: {embed_dims}")
+    else:
+        # API embedding mode
+        print(f"API embedding model: {model} (dims={embed_dims})")
+        print(f"  API base: {base_url}")
+        embedder = Embedder(base_url=base_url, api_key=api_key, model=model)
+
+    # Initialize store
+    from dive_mcp_host.rag import _get_doc_store_path
+
+    db_path = _get_doc_store_path()
+    store = DocStore(db_path, embed_dims)
+
+    # If reindex flag, clear existing documents
+    if args.reindex:
+        existing = store.list_documents()
+        if existing:
+            print(f"Re-indexing: removing {len(existing)} existing documents...")
+            for doc in existing:
+                store.delete_document(doc["source"])
+
+    # Index the directory
+    print("Starting indexing...\n")
+    result = await index_directory(
+        directory=doc_dir,
+        store=store,
+        embedder=embedder,
+    )
+
+    print("\n" + "=" * 50)
+    print("Indexing Summary:")
+    print(f"   Indexed: {result['indexed']} documents")
+    print(f"   Skipped: {result['skipped']} (already indexed or empty)")
+    print(f"   Errors: {result['errors']}")
+    print(f"   Total chunks: {result['total_chunks']}")
+
+    stats = store.get_stats()
+    print(f"\nDoc store: {stats['document_count']} docs, {stats['chunk_count']} chunks")
+
+
+async def _list_docs(args: type[CLIArgs]) -> None:
+    """List all indexed documents."""
+    from dive_mcp_host.rag import _get_doc_store_path
+    from dive_mcp_host.rag.vector_store import DocStore
+
+    db_path = _get_doc_store_path()
+    if not db_path.exists():
+        print("📭 No documents indexed yet.")
+        print("   Use: dive_cli --index-docs <directory>")
+        return
+
+    store = DocStore(db_path)
+    docs = store.list_documents()
+    stats = store.get_stats()
+
+    print("📚 Indexed Documents:")
+    print("=" * 60)
+    if not docs:
+        print("   (none)")
+    for doc in docs:
+        print(f"   📖 {doc['title'] or doc['source']}")
+        print(f"      Source: {doc['source']}")
+        print(f"      Pages: {doc['page_count']}, Chunks: {doc['chunk_count']}")
+        print(f"      Indexed: {doc['indexed_at']}")
+        print()
+
+    print(f"Total: {stats['document_count']} docs, {stats['chunk_count']} chunks")
+    print(f"Embedding dims: {stats['embed_dims']}")

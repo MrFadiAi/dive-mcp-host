@@ -2,6 +2,7 @@ from langchain_core.tools import BaseTool
 
 from dive_mcp_host.internal_tools.tools.bash import bash
 from dive_mcp_host.internal_tools.tools.confirmation import request_confirmation
+from dive_mcp_host.internal_tools.tools.doc_search import search_docs
 from dive_mcp_host.internal_tools.tools.fetch import fetch
 from dive_mcp_host.internal_tools.tools.file_ops import read_file, write_file
 from dive_mcp_host.internal_tools.tools.mcp_server import (
@@ -15,12 +16,13 @@ from dive_mcp_host.internal_tools.tools.mcp_server import (
 def get_local_tools() -> list[BaseTool]:
     """Get local tools that can be exposed to external LLMs.
 
-    These tools (fetch, bash, read_file, write_file) can be used by external LLMs
-    directly without going through the installer agent. They include built-in
-    safety mechanisms like user confirmation for potentially dangerous operations.
+    These tools (fetch, bash, read_file, write_file, search_docs) can be used
+    by external LLMs directly without going through the installer agent. They
+    include built-in safety mechanisms like user confirmation for potentially
+    dangerous operations.
 
     Returns:
-        List of local tools: fetch, bash, read_file, write_file.
+        List of local tools.
     """
     return [
         fetch,
@@ -32,4 +34,5 @@ def get_local_tools() -> list[BaseTool]:
         reload_mcp_server,
         request_confirmation,
         install_mcp_instructions,
+        search_docs,
     ]

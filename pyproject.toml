@@ -61,6 +61,10 @@ classifiers = [
 
 [project.optional-dependencies]
 clipboard = []
+rag = [
+    "pymupdf>=1.25.0",
+    "sentence-transformers>=3.0.0",
+]
 dev = [
     "pproxy",
     "pytest",
@@ -70,6 +74,7 @@ dev = [
     "pytest-timeout",
     "ruff",
     "uvicorn",
+    "pymupdf>=1.25.0",
 ]
 
 [project.urls]

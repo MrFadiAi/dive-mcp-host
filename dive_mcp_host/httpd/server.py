@@ -147,6 +147,21 @@ class DiveHostAPI(FastAPI):
         self._load_configs()
 
         # ================================================
+        # RAG Retriever (auto-init with local model)
+        # ================================================
+        try:
+            from dive_mcp_host.rag import init_retriever_from_config, get_retriever, init_local_retriever
+
+            init_retriever_from_config(self._model_config_manager)
+
+            # Auto-init with local model if no embedding config found
+            if get_retriever() is None:
+                logger.info("No embedding config found, auto-initializing with local model (all-MiniLM-L6-v2)")
+                init_local_retriever(model_name="all-MiniLM-L6-v2")
+        except Exception:
+            logger.warning("RAG retriever initialization skipped", exc_info=True)
+
+        # ================================================
         # Database
         # ================================================
         if self._service_config_manager.current_setting is None:

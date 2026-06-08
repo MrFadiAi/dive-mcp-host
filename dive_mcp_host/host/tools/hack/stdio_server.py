@@ -203,7 +203,7 @@ async def stdio_client(
             await write_stream.aclose()
             await read_stream_writer.aclose()
             await write_stream_reader.aclose()
-    logger.error("Process %s closed", "xx")
+        logger.info("MCP process %s closed", process.pid)
 
 
 def _get_executable_command(command: str) -> str:

@@ -120,10 +120,17 @@ class DiveMcpHost(ContextProtocol):
     async def _init_models(self) -> None:
         if self._model:
             return
+        kwargs = self._config.llm.to_load_model_kwargs()
+        logger.info(
+            "Loading model %s (provider=%s) with max_tokens=%s",
+            self._config.llm.model,
+            self._config.llm.model_provider,
+            kwargs.get("max_tokens"),
+        )
         model = load_model(
             self._config.llm.model_provider,
             self._config.llm.model,
-            **self._config.llm.to_load_model_kwargs(),
+            **kwargs,
         )
         self._model = model
         # Initialize local tools (fetch, bash, read_file, write_file)

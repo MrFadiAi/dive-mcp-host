@@ -100,6 +100,7 @@ class EmbedConfig(BaseModel):
     model: str | None = None
     embed_dims: int | None = None
     api_key: str | None = None
+    base_url: str | None = None
 
 
 class HostConfig(BaseModel):

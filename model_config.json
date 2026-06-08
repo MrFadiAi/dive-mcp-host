@@ -21,5 +21,10 @@
     }
   },
 
-  "enable_tools": true
+  "enable_tools": true,
+  "embedConfig": {
+    "provider": "local",
+    "model": "Qwen/Qwen3-Embedding-4B",
+    "embedDims": 2560
+  }
 }

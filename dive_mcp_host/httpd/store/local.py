@@ -48,7 +48,11 @@ class LocalStore(StoreProtocol):
     ) -> str | None:
         """Save a file to the local store."""
         if isinstance(file, str):
-            return file
+            # Resolve relative paths, expand ~, and validate existence
+            resolved = Path(file).expanduser().resolve()
+            if not resolved.exists() or not resolved.is_file():
+                return None
+            return str(resolved)
 
         if file.filename is None:
             return None

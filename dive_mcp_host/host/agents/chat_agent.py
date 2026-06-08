@@ -419,7 +419,7 @@ class ChatAgentFactory(AgentFactory[AgentState]):
             if self._tool_classes:
                 model = wrapped_model.bind_tools(self._tool_classes)
             model_runnable = (
-                self._prompt | self._file_msg_converter | drop_empty_messages | model
+                self._prompt | self._file_msg_converter | drop_empty_messages | truncate_tool_results | model
             )
         else:
             model_runnable = (
@@ -428,6 +428,7 @@ class ChatAgentFactory(AgentFactory[AgentState]):
                 | convert_messages
                 | self._file_msg_converter
                 | drop_empty_messages
+                | truncate_tool_results
                 | InterruptableModel(
                     model=self._model,
                     abort_signal=abort_signal,
@@ -599,22 +600,86 @@ def get_chat_agent_factory(
 
 @RunnableCallable
 def drop_empty_messages(inpt: ChatPromptValue | list[BaseMessage]) -> list[BaseMessage]:
-    """Drop empty messages."""
+    """Drop empty messages while preserving role alternation.
+
+    Simply removing empty messages can create consecutive messages with the
+    same role (e.g., two user messages in a row), which causes API errors
+    (GLM error 1214, OpenAI similar). Instead, replace empty messages with
+    a space placeholder to maintain the required user/assistant alternation.
+    """
     messages = inpt.to_messages() if isinstance(inpt, ChatPromptValue) else inpt
 
     result = []
     for message in messages:
-        # AIMessage have more constraints
-        if isinstance(message, AIMessage):
-            if (
-                not message.content
-                and not message.tool_calls
-                and not message.invalid_tool_calls
-                and not message.chunk_position  # type: ignore
-            ):
-                continue
-        # ToolMessage, SystemMessage, HumanMessage needs to have content
-        elif not message.content:
+        # SystemMessages are always kept as-is
+        if isinstance(message, SystemMessage):
+            result.append(message)
             continue
-        result.append(message)
+
+        # ToolMessages are always kept (they pair with tool_calls)
+        if isinstance(message, ToolMessage):
+            result.append(message)
+            continue
+
+        # AIMessage: keep if it has content, tool_calls, or is a streaming chunk
+        if isinstance(message, AIMessage):
+            has_content = bool(message.content)
+            has_tools = bool(message.tool_calls) or bool(message.invalid_tool_calls)
+            is_chunk = bool(getattr(message, "chunk_position", None))
+            if has_content or has_tools or is_chunk:
+                result.append(message)
+            else:
+                # Replace with placeholder to preserve alternation
+                result.append(AIMessage(content=" ", id=message.id))
+            continue
+
+        # HumanMessage: keep if it has content
+        if message.content:
+            result.append(message)
+        else:
+            # Replace with placeholder to preserve alternation
+            result.append(HumanMessage(content=" ", id=message.id))
+
+    return result
+
+
+MAX_TOOL_RESULT_CHARS = 15_000  # ~3-4K tokens per tool result
+
+
+@RunnableCallable
+def truncate_tool_results(inpt: ChatPromptValue | list[BaseMessage]) -> list[BaseMessage]:
+    """Truncate large tool results to prevent context window overflow.
+
+    GLM-5 models have a ~128K token context window. When the model calls many
+    tools at once (browse_project_tree, read_hardware_config, etc.), combined
+    results can exceed 1M characters, causing model_context_window_exceeded.
+    This truncates each tool result to 15K chars (~3-4K tokens) before the
+    model sees it, keeping full data in the database.
+    """
+    messages = inpt.to_messages() if isinstance(inpt, ChatPromptValue) else inpt
+
+    result = []
+    for message in messages:
+        if (
+            isinstance(message, ToolMessage)
+            and isinstance(message.content, str)
+            and len(message.content) > MAX_TOOL_RESULT_CHARS
+        ):
+            truncated = (
+                message.content[:MAX_TOOL_RESULT_CHARS]
+                + f"\n\n... [TRUNCATED: {len(message.content):,} chars total, "
+                f"showing first {MAX_TOOL_RESULT_CHARS:,}. "
+                f"Use specific tool calls to get details on individual items.]"
+            )
+            result.append(
+                ToolMessage(
+                    content=truncated,
+                    tool_call_id=message.tool_call_id,
+                    name=message.name,
+                    id=message.id,
+                )
+            )
+        else:
+            result.append(message)
+
     return result

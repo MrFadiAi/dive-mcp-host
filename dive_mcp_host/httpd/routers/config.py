@@ -177,6 +177,11 @@ async def post_model_embedding(
     host_config = await app.load_host_config()
     await app.dive_host["default"].reload(new_config=host_config)
 
+    # Initialize RAG retriever with new embedding config
+    from dive_mcp_host.rag import init_retriever_from_config
+
+    init_retriever_from_config(app.model_config_manager)
+
     return ResultResponse(success=True)
 
 
