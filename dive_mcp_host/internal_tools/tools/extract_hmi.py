@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 from typing import Annotated
 
 from langchain_core.runnables import RunnableConfig
@@ -11,6 +12,32 @@ from langchain_core.tools import InjectedToolArg, tool
 from pydantic import Field
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_hmi_tags_path(
+    project_path: str, hmi_tags_path: str | None
+) -> str | None:
+    """Resolve the HMITags.xlsx path.
+
+    An explicit ``hmi_tags_path`` wins (honoured as-is even if absent —
+    ``load_hmi_tags`` handles a missing file). When omitted, probe the common
+    TIA locations relative to the project (``DATA_HMI`` first, then the project
+    root) and return the first that exists. Returns ``None`` if none found.
+
+    Implements the auto-discovery the ``hmi_tags_path`` field documents but the
+    tool previously did not perform (it passed ``None`` straight through, so tag
+    resolution was silently skipped).
+    """
+    if hmi_tags_path:
+        return hmi_tags_path
+    base = Path(project_path)
+    for candidate in (
+        base / "DATA_HMI" / "HMITags.xlsx",
+        base / "HMITags.xlsx",
+    ):
+        if candidate.is_file():
+            return str(candidate)
+    return None
 
 
 @tool(
@@ -69,7 +96,7 @@ async def extract_hmi_screens(
         result = await asyncio.to_thread(
             parse_hmi_project,
             project_path,
-            hmi_tags_path=hmi_tags_path,
+            hmi_tags_path=_resolve_hmi_tags_path(project_path, hmi_tags_path),
             instance_id=instance_id,
         )
 
@@ -83,7 +110,7 @@ async def extract_hmi_screens(
 
         lines = [
             f"## HMI Screen Extraction: {os.path.basename(project_path)}",
-            f"",
+            "",
             f"**Device:** {device_name}",
             f"**Screens found:** {summary.total_screens}",
             f"**Total elements:** {summary.total_elements} "
@@ -93,9 +120,9 @@ async def extract_hmi_screens(
             f"**JS functions:** {summary.total_js_functions}",
             f"**Navigation links:** {summary.total_navigation_links}",
             f"**Cache key:** `{cache_key}` (reference this for follow-up queries)",
-            f"",
-            f"| Screen | Elements | Tags | JS | Nav |",
-            f"|--------|----------|------|----|-----|",
+            "",
+            "| Screen | Elements | Tags | JS | Nav |",
+            "|--------|----------|------|----|-----|",
         ]
 
         max_screens = 30
@@ -118,15 +145,15 @@ async def extract_hmi_screens(
 
         # Navigation map summary
         if result.navigation_map:
-            lines.append(f"\n**Navigation map:**")
+            lines.append("\n**Navigation map:**")
             for src, targets in result.navigation_map.items():
                 lines.append(f"- {src} → {', '.join(targets)}")
 
         lines.append(
-            f"\nAsk follow-up questions about any screen, element, or tag binding. "
-            f"For example: 'Show me the elements on START_SCHERM', "
-            f"'Which screens use Motor_Speed tag?', "
-            f"or 'List all navigation buttons on the main screen'."
+            "\nAsk follow-up questions about any screen, element, or tag binding. "
+            "For example: 'Show me the elements on START_SCHERM', "
+            "'Which screens use Motor_Speed tag?', "
+            "or 'List all navigation buttons on the main screen'."
         )
 
         return "\n".join(lines)

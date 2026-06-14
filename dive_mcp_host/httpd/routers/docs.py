@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from pathlib import Path
-from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Query, UploadFile
 from pydantic import BaseModel, Field
@@ -123,9 +121,14 @@ async def switch_model(
     from dive_mcp_host.rag import get_retriever, init_local_retriever
     from dive_mcp_host.rag.indexer import SUPPORTED_EXTENSIONS, index_document
 
-    # Get old dims to detect incompatibility
+    # Detect a model change (not just a dimensionality change): switching to a
+    # different model invalidates stored embeddings even at the same dimension
+    # count, because the vectors live in a different embedding space. init below
+    # clears the store in that case; we then re-index saved sources.
     old_retriever = get_retriever()
-    old_dims = old_retriever.store.embed_dims if old_retriever else 0
+    old_model = (
+        getattr(old_retriever.embedder, "model_name", None) if old_retriever else None
+    )
 
     try:
         new_retriever = init_local_retriever(model_name=request.model)
@@ -134,12 +137,13 @@ async def switch_model(
         return {"success": False, "message": f"Failed to load model: {e}"}
 
     new_dims = new_retriever.store.embed_dims
-    dims_changed = old_dims > 0 and old_dims != new_dims
+    model_changed = old_model is not None and old_model != request.model
 
-    # Auto re-index saved source files if dimensions changed
+    # Auto re-index saved source files if the model changed (the store was just
+    # cleared by init for a different embedding space).
     reindexed = 0
     total_chunks = 0
-    if dims_changed:
+    if model_changed:
         source_dir = DIVE_CONFIG_DIR / "rag_sources"
         if source_dir.exists():
             saved_files = [
@@ -160,10 +164,10 @@ async def switch_model(
                     logger.exception("Failed to re-index %s", file_path.name)
 
     msg = f"Switched to {request.model} ({new_dims} dims)"
-    if dims_changed and reindexed > 0:
+    if model_changed and reindexed > 0:
         msg += f". Re-indexed {reindexed} documents ({total_chunks} chunks)."
-    elif dims_changed:
-        msg += ". Index cleared (dimension mismatch)."
+    elif model_changed:
+        msg += ". Index cleared (model changed — re-index to rebuild)."
 
     return {
         "success": True,
@@ -330,6 +334,14 @@ async def delete_document(
 async def search_documents(
     query: str = Query(description="Search query"),
     top_k: int = Query(default=5, description="Max results"),
+    source_filter: str | None = Query(
+        default=None, description="Restrict search to a single source filename."
+    ),
+    max_distance: float | None = Query(
+        default=None,
+        description="Relevance ceiling (0-2, lower is more relevant). "
+        "Drop results whose distance exceeds this.",
+    ),
     app: DiveHostAPI = Depends(get_app),
 ) -> SearchResponse:
     """Search indexed documents (for testing/debugging, the agent uses the tool directly)."""
@@ -340,7 +352,9 @@ async def search_documents(
         return SearchResponse(success=False, query=query, formatted="Retriever not configured.")
 
     try:
-        results = await retriever.search(query, top_k=top_k)
+        results = await retriever.search(
+            query, top_k=top_k, source_filter=source_filter, max_distance=max_distance
+        )
         formatted = retriever.format_results(results, query)
         return SearchResponse(
             success=True,

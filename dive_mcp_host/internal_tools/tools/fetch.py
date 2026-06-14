@@ -31,6 +31,19 @@ from dive_mcp_host.internal_tools.tools.common import check_aborted
 logger = logging.getLogger(__name__)
 
 
+def _truncate_response(text: str, limit: int = 50000) -> str:
+    """Cap a response body at ``limit`` chars with a truncation marker.
+
+    Applied to every text-ish content type (text, XML, JSON) so a large
+    response can't overflow the agent's context. Previously JSON was returned
+    untruncated while text/XML were capped — an inconsistency that could flood
+    context on a big JSON fetch.
+    """
+    if len(text) > limit:
+        return text[:limit] + "\n... (truncated)"
+    return text
+
+
 @tool(
     description="""Fetch content from a URL.
 Use this to retrieve documentation, package information, or other web content.
@@ -114,14 +127,9 @@ async def fetch(
 
             content_type = response.headers.get("content-type", "")
             if "application/json" in content_type:
-                result = response.text
+                result = _truncate_response(response.text)
             elif "text/" in content_type or "application/xml" in content_type:
-                # Truncate very long responses
-                text = response.text
-                if len(text) > 50000:
-                    result = text[:50000] + "\n... (truncated)"
-                else:
-                    result = text
+                result = _truncate_response(response.text)
             else:
                 # For binary content, just return a summary
                 result = f"Binary content ({content_type}), size: {len(response.content)} bytes"

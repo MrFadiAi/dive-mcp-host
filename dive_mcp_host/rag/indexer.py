@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -20,6 +21,20 @@ SUPPORTED_EXTENSIONS = {".pdf", ".txt", ".md", ".markdown", ".rst", ".html", ".h
 
 # Module-level indexing progress state (read by /api/docs/progress)
 _indexing_state: dict = {}
+
+
+def _file_hash(file_path: Path) -> str:
+    """Return the SHA-256 hex digest of a file's raw bytes.
+
+    Used to detect whether a source file changed since it was last indexed, so
+    re-indexing can skip unchanged files and refresh changed ones instead of
+    skipping every already-known filename (which left stale chunks in place).
+    """
+    h = hashlib.sha256()
+    with file_path.open("rb") as f:
+        for block in iter(lambda: f.read(65536), b""):
+            h.update(block)
+    return h.hexdigest()
 
 
 def _extract_text_from_pdf(pdf_path: Path) -> list[dict]:
@@ -162,6 +177,7 @@ async def index_document(
         title=title,
         page_count=page_count,
         chunks=chunks_with_embeddings,
+        content_hash=_file_hash(file_path),
     )
 
     logger.info(
@@ -230,12 +246,21 @@ async def index_directory(
         logger.warning("No supported files found in %s", directory)
         return {"indexed": 0, "skipped": 0, "errors": 0, "total_chunks": 0}
 
-    # Check which files are already indexed
-    existing_docs = {d["source"] for d in store.list_documents()}
+    # Check which files are already indexed and unchanged. A file is skipped
+    # only when its name is known AND its content hash matches — editing a
+    # document and re-indexing must refresh it, not silently keep stale chunks.
+    existing_hashes = store.get_content_hashes()
 
-    # Filter out already-indexed files
-    pending_files = [f for f in sorted(files) if f.name not in existing_docs]
-    skipped = total_files - len(pending_files)
+    pending_files: list[Path] = []
+    file_hashes: dict[Path, str] = {}
+    skipped = 0
+    for f in sorted(files):
+        fhash = _file_hash(f)
+        if f.name in existing_hashes and existing_hashes[f.name] == fhash:
+            skipped += 1
+            continue
+        pending_files.append(f)
+        file_hashes[f] = fhash
 
     # Initialize progress state
     _indexing_state = {
@@ -256,7 +281,6 @@ async def index_directory(
     # Pre-warm the embedding model (loads into memory, may take 30-60s first time)
     logger.info("Pre-loading embedding model...")
     try:
-        loop = asyncio.get_event_loop()
         # Use a dummy embed call which handles model loading in executor
         await embedder.embed_texts(["__warmup__"])
         # Discard the warmup embedding — just needed to load the model
@@ -320,6 +344,7 @@ async def index_directory(
                         "title": title,
                         "page_count": page_count,
                         "chunks_text": all_chunks,
+                        "content_hash": file_hashes[file_path],
                     })
                 except Exception:
                     logger.exception("Error reading %s", file_path.name)
@@ -368,6 +393,7 @@ async def index_directory(
                     "source": doc["source"],
                     "title": doc["title"],
                     "page_count": doc["page_count"],
+                    "content_hash": doc.get("content_hash"),
                     "chunks": chunks_with_embeddings,
                 })
 

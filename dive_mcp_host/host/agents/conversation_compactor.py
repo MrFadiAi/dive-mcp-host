@@ -13,7 +13,6 @@ The compaction flow:
 """
 
 import logging
-from typing import Literal
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import (
@@ -55,9 +54,12 @@ the conversation so far that preserves ALL important context for the AI assistan
 to continue the conversation seamlessly.
 
 Rules:
-- Preserve key facts, decisions, user preferences, and any explicitly stated requirements.
-- Keep specific code references (file paths, function names, variable names, error messages).
-- Keep tag names, PLC block names, HMI screen names, and other domain-specific identifiers.
+- Preserve key facts, decisions, user preferences, and any explicitly stated \
+requirements.
+- Keep specific code references (file paths, function names, variable names, \
+error messages).
+- Keep tag names, PLC block names, HMI screen names, and other domain-specific \
+identifiers.
 - Note any tools that were called and their key results.
 - Do NOT include pleasantries or conversational filler.
 - Be concise but complete — this summary replaces the original messages.
@@ -144,6 +146,7 @@ class CompactionResult:
         tokens_before: int = 0,
         tokens_after: int = 0,
     ) -> None:
+        """Initialize the compaction result fields."""
         self.messages = messages
         self.compacted = compacted
         self.summary = summary
@@ -169,6 +172,13 @@ def find_safe_cut_point(
     Returns:
         A safe index to split at (all messages before this index form complete pairs).
     """
+    if not messages:
+        return 0
+
+    # Clamp to last valid index: callers pass len(messages) when the recent-window
+    # walk kept nothing (e.g. the most recent message alone exceeds the budget).
+    target_index = min(target_index, len(messages) - 1)
+
     # Walk backwards from target_index to find a safe HumanMessage boundary
     for i in range(target_index, 0, -1):
         msg = messages[i]
@@ -176,9 +186,16 @@ def find_safe_cut_point(
         if isinstance(msg, HumanMessage):
             return i
 
-    # Fallback: if we can't find a safe cut, use target_index
-    # (this shouldn't happen in normal conversations)
-    return target_index
+    # No HumanMessage boundary below target (e.g. a long agentic tool-call chain
+    # after the first user message). Never cut at a ToolMessage index — that
+    # would start ``recent_messages`` with an orphaned tool result whose
+    # preceding AI tool-call landed in ``old`` (API error). Cut before the
+    # nearest non-ToolMessage (an AIMessage keeps its own tool_calls + responses
+    # together in recent); if everything is a ToolMessage, give up at 0.
+    for i in range(target_index, 0, -1):
+        if not isinstance(messages[i], ToolMessage):
+            return i
+    return 0
 
 
 async def compact_conversation(
@@ -232,7 +249,6 @@ async def compact_conversation(
 
     # Calculate how many tokens to keep for recent messages
     recent_budget = int(context_window * RECENT_WINDOW_RATIO)
-    target_total = budget - MAX_SUMMARY_TOKENS  # Leave room for the summary
 
     # Find the split point: walk backwards to find where recent messages start
     recent_tokens = 0
@@ -240,7 +256,10 @@ async def compact_conversation(
 
     for i in range(len(messages) - 1, -1, -1):
         msg_tokens = count_tokens_approximately([messages[i]])
-        if recent_tokens + msg_tokens > recent_budget:
+        # Always keep the most recent message even if it alone exceeds the budget:
+        # summarizing the current turn discards what the user just said, and
+        # recent_start == len(messages) would index past the list end.
+        if recent_start != len(messages) and recent_tokens + msg_tokens > recent_budget:
             break
         recent_tokens += msg_tokens
         recent_start = i
@@ -275,7 +294,8 @@ async def compact_conversation(
     # Call LLM to summarize
     try:
         response = await model.ainvoke(summarize_messages)
-        summary_text = response.content if isinstance(response.content, str) else str(response.content)
+        content = response.content
+        summary_text = content if isinstance(content, str) else str(content)
     except Exception:
         logger.exception("Failed to summarize conversation, falling back to trim")
         # Fallback: just use the recent messages without a summary
@@ -332,16 +352,29 @@ def _build_summarize_input(messages: list[BaseMessage]) -> str:
             text = _extract_text(msg.content)
             parts.append(f"User: {_truncate(text, 2000)}")
         elif isinstance(msg, AIMessage):
-            # Include tool calls
+            # Include tool calls. List EVERY tool called this turn (deduped by
+            # name) so the summary retains the full tool history — the old cap
+            # at 5 calls/turn lost later calls in long agentic runs. Names are
+            # compact; one representative call keeps a little argument context.
             if msg.tool_calls:
-                for tc in msg.tool_calls[:5]:  # Limit tool calls shown
+                seen: set[str] = set()
+                names: list[str] = []
+                for tc in msg.tool_calls:
                     name = tc.get("name", "unknown")
-                    args = str(tc.get("args", {}))[:300]
-                    parts.append(f"Assistant called {name}({args})")
+                    if name not in seen:
+                        seen.add(name)
+                        names.append(name)
+                parts.append(f"Assistant called tools: {', '.join(names)}")
+                first = msg.tool_calls[0]
+                first_args = str(first.get("args", {}))[:200]
+                parts.append(
+                    f"Assistant first call: {first.get('name', 'unknown')}({first_args})"
+                )
             if isinstance(msg.content, str) and msg.content.strip():
                 parts.append(f"Assistant: {_truncate(msg.content, 1000)}")
         elif isinstance(msg, ToolMessage):
-            result = _truncate(msg.content if isinstance(msg.content, str) else str(msg.content), 500)
+            content = msg.content if isinstance(msg.content, str) else str(msg.content)
+            result = _truncate(content, 500)
             parts.append(f"Tool result ({msg.name}): {result}")
 
     conversation = "\n\n".join(parts)

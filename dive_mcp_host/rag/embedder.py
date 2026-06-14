@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 from typing import TYPE_CHECKING
 
-import numpy as np
 from openai import AsyncOpenAI
 
 if TYPE_CHECKING:
-    pass
+    from dive_mcp_host.rag.vector_store import DocStore
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +37,153 @@ def get_model_dims(model_name: str) -> int | None:
     Returns None if the model is not in the known list.
     """
     return MODEL_DIMS.get(model_name)
+
+
+def _assert_embedding_count(text_count: int, embedding_count: int, model: str) -> None:
+    """Validate an embedder returned one vector per input text.
+
+    Without this guard a short/partial response silently misaligns texts and
+    embeddings; the indexer's ``zip(chunks, embeddings)`` would then truncate,
+    dropping chunks with no error (silent data loss). Raise a clear error so the
+    failure is loud and the two indexer paths behave consistently.
+    """
+    if embedding_count != text_count:
+        msg = (
+            f"Embedding model '{model}' returned {embedding_count} vectors "
+            f"for {text_count} inputs — counts must match. "
+            "Refusing to store a misaligned batch (would corrupt the index)."
+        )
+        raise ValueError(msg)
+
+
+def _hash_text(text: str) -> str:
+    """Stable SHA-256 digest of ``text`` — the persistent cache key (plus model)."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+class CachedEmbedder:
+    """Wraps an embedder with an in-memory, content-addressed text→vector cache.
+
+    Embedding (especially the local sentence-transformers path) is the slow,
+    CPU-bound bottleneck of indexing. Identical text always embeds to the same
+    vector, so memoising it avoids re-encoding boilerplate, repeated passages,
+    or unchanged chunks when a document is re-indexed. ``embed_texts`` batches
+    *only the cache misses* in a single delegate call and interleaves the cached
+    vectors back in order, and dedupes identical texts within one batch.
+
+    Two layers: an in-memory dict (fast, process-local) and, when ``store`` is
+    given, a persistent sqlite cache keyed by ``(sha256(text), model)`` that
+    survives restarts — so re-indexing unchanged text after a restart skips
+    embedding entirely. The model key means a model change never returns another
+    model's vectors (different embedding space). It is a transparent wrapper —
+    anything expecting an embedder (``embed_text`` / ``embed_texts``) can use it
+    unchanged. The ``dimensions`` / ``model_name`` properties delegate to inner.
+    """
+
+    def __init__(
+        self,
+        inner: Embedder | LocalEmbedder,
+        store: DocStore | None = None,
+    ) -> None:
+        """Wrap ``inner`` with an in-memory cache, optionally backed by ``store``."""
+        self._inner = inner
+        self._store = store
+        self._cache: dict[str, list[float]] = {}
+        self.cache_hits = 0
+        self.cache_misses = 0
+
+    def _model_key(self) -> str:
+        return self.model_name or ""
+
+    @property
+    def dimensions(self) -> int | None:
+        """Delegate to the inner embedder's dimensions when available."""
+        return getattr(self._inner, "dimensions", None)
+
+    @property
+    def model_name(self) -> str | None:
+        """Delegate the inner embedder's model name.
+
+        Covers both ``LocalEmbedder.model_name`` and ``Embedder.model``. Exposed
+        so callers that read ``embedder.model_name`` (the stats endpoint,
+        model-change detection) keep working through the wrapper.
+        """
+        return getattr(self._inner, "model_name", None) or getattr(
+            self._inner, "model", None
+        )
+
+    async def embed_text(self, text: str) -> list[float]:
+        """Embed a single text, serving from the in-memory then persistent cache."""
+        cached = self._cache.get(text)
+        if cached is not None:
+            self.cache_hits += 1
+            return cached
+        if self._store is not None:
+            model = self._model_key()
+            persisted = self._store.get_cached_embedding(_hash_text(text), model)
+            if persisted is not None:
+                self._cache[text] = persisted
+                self.cache_hits += 1
+                return persisted
+        self.cache_misses += 1
+        vector = await self._inner.embed_text(text)
+        self._cache[text] = vector
+        if self._store is not None:
+            self._store.put_cached_embedding(
+                _hash_text(text), self._model_key(), vector
+            )
+        return vector
+
+    async def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        """Embed many texts, resolving in-memory then persistent then inner.
+
+        Dedupes identical texts (within the batch and across calls) and batches
+        only the true misses into one delegate call.
+        """
+        # Phase 1: resolve each unique text from in-memory, then persistent.
+        unique_texts = list(dict.fromkeys(texts))
+        resolved: dict[str, list[float]] = {}
+        not_in_mem: list[str] = []
+        for t in unique_texts:
+            v = self._cache.get(t)
+            if v is not None:
+                resolved[t] = v
+                self.cache_hits += 1
+            else:
+                not_in_mem.append(t)
+
+        to_embed = not_in_mem
+        if not_in_mem and self._store is not None:
+            model = self._model_key()
+            hashes = {t: _hash_text(t) for t in not_in_mem}
+            persisted = self._store.get_cached_embeddings(
+                [hashes[t] for t in not_in_mem], model
+            )
+            to_embed = []
+            for t in not_in_mem:
+                v = persisted.get(hashes[t])
+                if v is not None:
+                    resolved[t] = v
+                    self._cache[t] = v
+                    self.cache_hits += 1
+                else:
+                    to_embed.append(t)
+
+        # Phase 2: embed the true misses (already deduped via unique_texts).
+        if to_embed:
+            fresh = await self._inner.embed_texts(to_embed)
+            self.cache_misses += len(to_embed)
+            entries: list[tuple[str, list[float]]] = []
+            model = self._model_key()
+            for t, v in zip(to_embed, fresh, strict=True):
+                resolved[t] = v
+                self._cache[t] = v
+                if self._store is not None:
+                    entries.append((_hash_text(t), v))
+            if self._store is not None and entries:
+                self._store.put_cached_embeddings(entries, model)
+
+        return [resolved[t] for t in texts]
 
 
 class Embedder:
@@ -109,6 +256,7 @@ class Embedder:
             )
             # Sort by index to maintain order
             sorted_data = sorted(response.data, key=lambda d: d.index)
+            _assert_embedding_count(len(batch), len(sorted_data), self.model)
             all_embeddings.extend([d.embedding for d in sorted_data])
 
             if len(texts) > batch_size:
@@ -247,4 +395,6 @@ class LocalEmbedder:
             ),
         )
         logger.info("embed_texts: encoded %d texts in %.1fs", len(texts), time.monotonic() - t1)
-        return embeddings.tolist()
+        result = embeddings.tolist()
+        _assert_embedding_count(len(texts), len(result), self.model_name)
+        return result

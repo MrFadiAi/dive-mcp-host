@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import TYPE_CHECKING
 
 import tiktoken
@@ -139,11 +140,15 @@ def _split_large_text(
     chunk_overlap: int,
     encoding: tiktoken.Encoding | None,
 ) -> list[str]:
-    """Split a large text block by sentences, respecting token limits."""
-    # Split on sentence boundaries
-    import re
+    """Split a large text block by sentences, respecting token limits.
 
-    sentences = re.split(r"(?<=[.!?])\s+", text)
+    A single sentence that itself exceeds ``chunk_size`` (e.g. a run-on with
+    no terminator) is handed to :func:`_split_by_words` so the size limit is
+    still honoured — without that fallback the whole sentence became one
+    oversized chunk.
+    """
+    # Split on sentence boundaries
+    sentences = _SENTENCE_BOUNDARY.split(text)
 
     chunks: list[str] = []
     current: list[str] = []
@@ -151,6 +156,19 @@ def _split_large_text(
 
     for sentence in sentences:
         sent_tokens = count_tokens(sentence, encoding)
+
+        # A single sentence larger than chunk_size cannot stay atomic — split it
+        # by words so chunk_size remains a hard ceiling for splittable text.
+        if sent_tokens > chunk_size:
+            if current:
+                chunks.append(" ".join(current))
+                current = []
+                current_tokens = 0
+            word_chunks = _split_by_words(
+                sentence, chunk_size, chunk_overlap, encoding
+            )
+            chunks.extend(word_chunks)
+            continue
 
         if current_tokens + sent_tokens > chunk_size and current:
             chunks.append(" ".join(current))
@@ -173,13 +191,72 @@ def _split_large_text(
     return chunks
 
 
+def _split_by_words(
+    text: str,
+    chunk_size: int,
+    chunk_overlap: int,
+    encoding: tiktoken.Encoding | None,
+) -> list[str]:
+    """Word-level fallback splitter — guarantees ``chunk_size`` is a hard ceiling.
+
+    Used when no sentence boundary is available (e.g. token streams, run-on
+    text). Word boundaries are atomic, so a single very long word can overshoot
+    by a few tokens; for normal prose every chunk stays within the limit.
+    """
+    words = text.split()
+    if not words:
+        return []
+
+    chunks: list[str] = []
+    current: list[str] = []
+    current_tokens = 0
+
+    for word in words:
+        word_tokens = count_tokens(word, encoding)
+        if current_tokens + word_tokens > chunk_size and current:
+            chunks.append(" ".join(current))
+            # Keep the last chunk_overlap tokens for overlap context.
+            if chunk_overlap > 0:
+                kept: list[str] = []
+                kept_tokens = 0
+                for w in reversed(current):
+                    wtk = count_tokens(w, encoding)
+                    if kept_tokens + wtk > chunk_overlap:
+                        break
+                    kept.insert(0, w)
+                    kept_tokens += wtk
+                current = kept
+                current_tokens = kept_tokens
+            else:
+                current = []
+                current_tokens = 0
+
+        current.append(word)
+        current_tokens += word_tokens
+
+    if current:
+        chunks.append(" ".join(current))
+
+    return chunks
+
+
+_SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?])\s+")
+
+
 def _keep_last_tokens(
     text: str,
     max_tokens: int,
     encoding: tiktoken.Encoding | None,
 ) -> str:
-    """Keep the last N tokens from text, splitting on sentence boundaries."""
-    sentences = text.split(". ")
+    r"""Keep the last N tokens from text, splitting on sentence boundaries.
+
+    Splits on any sentence-ending punctuation followed by whitespace — including
+    the ``\n\n`` separators produced when paragraphs are joined. The previous
+    ``text.split(". ")`` only matched period-space, so for paragraph-joined text
+    (periods followed by newlines) it found no boundary, produced one over-budget
+    "sentence", and returned ``""`` — silently disabling overlap.
+    """
+    sentences = _SENTENCE_BOUNDARY.split(text)
     result: list[str] = []
     token_count = 0
 
@@ -191,4 +268,7 @@ def _keep_last_tokens(
         result.insert(0, sentence)
         token_count += sent_tokens
 
-    return ". ".join(result).strip()
+    # Sentences retain their trailing punctuation (the split consumes only the
+    # whitespace), so rejoin with a plain space — not ". ", which would double
+    # the periods.
+    return " ".join(result).strip()

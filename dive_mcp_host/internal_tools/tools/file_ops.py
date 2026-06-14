@@ -36,6 +36,26 @@ from dive_mcp_host.internal_tools.tools.common import check_aborted
 logger = logging.getLogger(__name__)
 
 
+def _slice_lines(
+    content: str, start_line: int | None, end_line: int | None
+) -> str:
+    """Return the 1-based ``[start_line, end_line]`` slice of ``content``.
+
+    ``None`` start = from the beginning; ``None`` end = to the end. Both bounds
+    are inclusive. Out-of-range values clamp; ``start > end`` (or start past the
+    end of the file) yields ``""``. Lines keep their trailing newline.
+    """
+    if start_line is None and end_line is None:
+        return content
+    lines = content.splitlines(keepends=True)
+    total = len(lines)
+    start = 1 if start_line is None else max(1, start_line)
+    end = total if end_line is None else max(1, end_line)
+    if start > total or start > end:
+        return ""
+    return "".join(lines[start - 1 : end])
+
+
 @tool(
     description="""
 Read content from a file.
@@ -49,6 +69,20 @@ async def read_file(
         str,
         Field(default="utf-8", description="File encoding."),
     ] = "utf-8",
+    start_line: Annotated[
+        int | None,
+        Field(
+            default=None,
+            description="1-based first line to read (inclusive). None = from start.",
+        ),
+    ] = None,
+    end_line: Annotated[
+        int | None,
+        Field(
+            default=None,
+            description="1-based last line to read (inclusive). None = to end.",
+        ),
+    ] = None,
     config: Annotated[RunnableConfig | None, InjectedToolArg] = None,
 ) -> str:
     """Read a file.
@@ -88,13 +122,20 @@ async def read_file(
         else:
             content = file_path.read_text(encoding=encoding)
 
+            # Optional 1-based line range (read a slice of a large file)
+            content = _slice_lines(content, start_line, end_line)
+
             # Truncate very long files
             if len(content) > 100000:
                 result = content[:100000] + "\n... (truncated)"
             else:
                 result = content
 
-    except OSError as e:
+    # OSError covers filesystem failures; UnicodeError covers binary files
+    # read as text (UnicodeDecodeError) and un-encodable content on write;
+    # LookupError covers an unknown codec. All three must surface as a clean
+    # error string rather than crash the tool.
+    except (OSError, UnicodeError, LookupError) as e:
         result = f"Error reading file {path}: {e}"
 
     return result
@@ -121,6 +162,13 @@ async def write_file(
             default=True, description="Create parent directories if they don't exist."
         ),
     ] = True,
+    append: Annotated[
+        bool,
+        Field(
+            default=False,
+            description="Append to the file instead of overwriting it (for logs).",
+        ),
+    ] = False,
     config: Annotated[RunnableConfig | None, InjectedToolArg] = None,
 ) -> str:
     """Write to a file.
@@ -137,6 +185,7 @@ async def write_file(
         content=content,
         encoding=encoding,
         create_dirs=create_dirs,
+        append=append,
         stream_writer=stream_writer,
         dry_run=dry_run,
         config=config,
@@ -148,6 +197,7 @@ async def execute_write(
     content: str,
     encoding: str,
     create_dirs: bool,
+    append: bool,
     stream_writer: Callable[[tuple[str, Any]], None],
     dry_run: bool,
     config: RunnableConfig,
@@ -195,13 +245,20 @@ async def execute_write(
 
     # If dry_run is enabled, simulate success without writing
     if dry_run:
+        verb = "append" if append else "write"
         return (
-            f"[DRY RUN] Would write {len(content)} bytes to {path}\nSimulated success."
+            f"[DRY RUN] Would {verb} {len(content)} bytes to {path}\n"
+            f"Simulated success."
         )
 
     # Request user confirmation before writing
     if elicitation_manager is not None:
-        operation = "overwrite" if file_exists else "create"
+        if append:
+            operation = "append to"
+        elif file_exists:
+            operation = "overwrite"
+        else:
+            operation = "create"
         confirm_message = (
             f"The write_file tool wants to {operation} the following file:\n\n"
             f"**Path:** `{path}`\n"
@@ -248,9 +305,17 @@ async def execute_write(
         if create_dirs:
             file_path.parent.mkdir(parents=True, exist_ok=True)
 
-        file_path.write_text(content, encoding=encoding)
+        if append:
+            with file_path.open("a", encoding=encoding) as f:
+                f.write(content)
+            verb = "appended"
+        else:
+            file_path.write_text(content, encoding=encoding)
+            verb = "wrote"
 
-        return f"Successfully wrote {len(content)} bytes to {path}"
+        return f"Successfully {verb} {len(content)} bytes to {path}"
 
-    except OSError as e:
+    # See read_file: cover filesystem + encoding failures (LookupError for an
+    # unknown codec, UnicodeError for un-encodable content) as a clean error.
+    except (OSError, UnicodeError, LookupError) as e:
         return f"Error writing to file {path}: {e}"

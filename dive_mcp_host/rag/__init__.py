@@ -10,7 +10,7 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from dive_mcp_host.rag.embedder import Embedder, LocalEmbedder
+from dive_mcp_host.rag.embedder import CachedEmbedder, Embedder, LocalEmbedder
 from dive_mcp_host.rag.retriever import DocSearchRetriever
 from dive_mcp_host.rag.vector_store import DocStore
 
@@ -28,6 +28,7 @@ __all__ = [
     "init_retriever",
     "init_retriever_from_config",
     "init_local_retriever",
+    "is_model_stale",
 ]
 
 # Module-level singleton retriever
@@ -69,6 +70,45 @@ def _get_doc_store_path() -> Path:
     return DIVE_CONFIG_DIR / "doc_store.sqlite"
 
 
+def is_model_stale(
+    document_count: int, stored_model: str | None, current_model: str
+) -> bool:
+    """True if the store holds vectors indexed by a *different* model.
+
+    Switching the embedding model invalidates stored embeddings even when the
+    two models share the same dimensionality — the vectors live in different
+    embedding spaces, so cross-model search distances are meaningless (the
+    silent-corruption case ``switch_model`` previously missed because it only
+    compared dimensions). A store with no data, or a legacy store with no
+    recorded model, is treated as not-stale so an upgrade never wipes a user's
+    index unprompted.
+    """
+    if document_count <= 0:
+        return False
+    if stored_model is None:
+        return False
+    return stored_model != current_model
+
+
+def _invalidate_if_model_changed(store: DocStore, current_model: str) -> None:
+    """Clear the store if its vectors were indexed by a different model.
+
+    Records ``current_model`` as the indexing model afterwards (whether or not a
+    clear happened), so the claim stays correct for the next comparison.
+    """
+    stored_model = store.get_meta("indexing_model")
+    stats = store.get_stats()
+    if is_model_stale(stats["document_count"], stored_model, current_model):
+        logger.warning(
+            "Clearing document store: vectors were indexed by '%s', "
+            "now using '%s' (different embedding space). Re-index to rebuild.",
+            stored_model,
+            current_model,
+        )
+        store.clear()
+    store.set_meta("indexing_model", current_model)
+
+
 def init_retriever(
     db_path: Path,
     base_url: str,
@@ -82,8 +122,11 @@ def init_retriever(
     """
     global _retriever  # noqa: PLW0603
     store = DocStore(db_path, embed_dims)
+    _invalidate_if_model_changed(store, model)
     embedder = Embedder(base_url=base_url, api_key=api_key, model=model)
-    _retriever = DocSearchRetriever(store=store, embedder=embedder)
+    _retriever = DocSearchRetriever(
+        store=store, embedder=CachedEmbedder(embedder, store=store)
+    )
     logger.info(
         "RAG retriever initialized (api model=%s, dims=%d, db=%s)",
         model,
@@ -118,7 +161,10 @@ def init_local_retriever(
 
     embed_dims = get_model_dims(model_name) or 768
     store = DocStore(db_path, embed_dims)
-    _retriever = DocSearchRetriever(store=store, embedder=embedder)
+    _invalidate_if_model_changed(store, model_name)
+    _retriever = DocSearchRetriever(
+        store=store, embedder=CachedEmbedder(embedder, store=store)
+    )
     logger.info(
         "RAG retriever initialized (local model=%s, dims=%d, db=%s)",
         model_name,

@@ -291,6 +291,32 @@ def _detect_write_command(command: str) -> tuple[bool, list[str]]:
     return len(reasons) > 0, reasons
 
 
+def _is_rm_recursive_force(command: str) -> bool:
+    """True if an ``rm`` invocation carries BOTH a recursive and a force flag.
+
+    The naive ``-rf``/``-fr`` substring check missed every other spelling:
+    separate flags (``-r -f``), capital recursive (``-Rf``), long flags
+    (``--recursive --force``), and verbose clusters (``-rvf``) — all equally
+    dangerous. This tokenises the flags so any combination is caught.
+    """
+    if not re.search(r"\brm\b", command, re.IGNORECASE):
+        return False
+    recursive = force = False
+    for tok in command.split():
+        if tok.startswith("--"):
+            if "recursive" in tok:
+                recursive = True
+            if "force" in tok:
+                force = True
+        elif tok.startswith("-") and len(tok) > 1:
+            # Short flag cluster, e.g. -rf, -fr, -Rf, -r, -f, -rvf
+            if "r" in tok or "R" in tok:
+                recursive = True
+            if "f" in tok:
+                force = True
+    return recursive and force
+
+
 def _detect_high_risk_command(command: str) -> tuple[bool, list[str]]:
     """Detect if a command is high-risk.
 
@@ -304,8 +330,8 @@ def _detect_high_risk_command(command: str) -> tuple[bool, list[str]]:
     if "sudo " in command_lower or command_lower.startswith("sudo"):
         reasons.append("Uses sudo (elevated privileges)")
 
-    # Check for dangerous rm commands
-    if "rm " in command_lower and ("-rf" in command_lower or "-fr" in command_lower):
+    # Check for dangerous rm commands (recursive + force, any flag spelling)
+    if _is_rm_recursive_force(command):
         reasons.append("Recursive force delete (rm -rf)")
 
     # Check for system directories
@@ -324,5 +350,29 @@ def _detect_high_risk_command(command: str) -> tuple[bool, list[str]]:
     # Check for chmod/chown
     if "chmod " in command_lower or "chown " in command_lower:
         reasons.append("Changes file permissions/ownership")
+
+    # Raw disk / device overwrite (dd of=/dev/...) — destroys a block device.
+    # dd to a regular file (of=image.img) is intentionally NOT matched here.
+    if re.search(r"\bdd\b", command_lower) and re.search(
+        r"of\s*=\s*/dev/", command_lower
+    ):
+        reasons.append("Raw disk write (dd to a block device)")
+
+    # Filesystem format / repartition — destroys existing data on the device.
+    if re.search(r"\bmkfs(?:\.\w+)?\b", command_lower) or re.search(
+        r"\b(?:fdisk|parted|cfdisk)\b", command_lower
+    ):
+        reasons.append("Disk format / repartition")
+
+    # System power control (halt / reboot / power off).
+    if re.search(r"\b(?:shutdown|reboot|halt|poweroff)\b", command_lower) or re.search(
+        r"\binit\s+[06]\b", command_lower
+    ):
+        reasons.append("System power control (shutdown/reboot)")
+
+    # Fork-bomb signature: a function named ':' that pipes to itself
+    # (e.g. ``:(){ :|:& };:``). Only fork bombs define such a function.
+    if re.search(r":\s*\(\)\s*\{", command):
+        reasons.append("Fork bomb")
 
     return len(reasons) > 0, reasons

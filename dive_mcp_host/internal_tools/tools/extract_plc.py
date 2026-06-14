@@ -69,7 +69,7 @@ async def extract_plc_blocks(
         summary = result.summary
         lines = [
             f"## PLC Block Extraction: {os.path.basename(blocks_path)}",
-            f"",
+            "",
             f"**Blocks found:** {summary.total_blocks} "
             f"({summary.fb_count} FB, {summary.fc_count} FC, {summary.ob_count} OB, {summary.db_count} DB, {summary.idb_count} IDB)",
             f"**Languages:** {summary.scl_count} SCL, {summary.stl_count} STL",
@@ -77,9 +77,9 @@ async def extract_plc_blocks(
             f"**Tag references:** {summary.unique_tag_refs} unique tags across all blocks",
             f"**Block calls:** {summary.total_calls} calls between blocks",
             f"**Cache key:** `{cache_key}` (reference this for follow-up queries)",
-            f"",
-            f"| Block | Type | # | Lang | Interface | Calls | Tags |",
-            f"|-------|------|---|------|-----------|-------|------|",
+            "",
+            "| Block | Type | # | Lang | Interface | Calls | Tags |",
+            "|-------|------|---|------|-----------|-------|------|",
         ]
 
         max_blocks = 50
@@ -100,9 +100,9 @@ async def extract_plc_blocks(
             lines.append(f"\n⚠️ {len(result.errors)} files had parse errors")
 
         lines.append(
-            f"\nAsk follow-up questions about any block, tag, or call relationship. "
-            f"For example: 'Show me the code of FC102', 'Which blocks use tag Motor_Speed?', "
-            f"or 'Draw the call tree starting from OB1'."
+            "\nAsk follow-up questions about any block, tag, or call relationship. "
+            "For example: 'Show me the code of FC102', 'Which blocks use tag Motor_Speed?', "
+            "or 'Draw the call tree starting from OB1'."
         )
 
         return "\n".join(lines)

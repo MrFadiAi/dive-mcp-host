@@ -26,6 +26,14 @@ class _DiveSkillInput(BaseModel):
     skill_name: str = Field(description="Name of the skill to load.")
 
 
+class _DiveSearchSkillInput(BaseModel):
+    """Input schema for the dive_search_skills tool."""
+
+    query: str = Field(
+        description="Keyword(s) to search for across skill names and descriptions."
+    )
+
+
 class SkillManager:
     """Manager for reading and listing skills from the skill directory."""
 
@@ -44,6 +52,10 @@ class SkillManager:
         if not self._skill_dir.exists():
             logger.warning("skill dir not found: %s", self._skill_dir)
             self._skills_cache = {}
+            # Early return: without it, control falls through to iterdir() on
+            # the missing dir, raises, and logs a spurious "error when loading
+            # skill" exception on top of the warning above.
+            return
 
         result: dict[str, Skill] = {}
         try:
@@ -163,15 +175,95 @@ class SkillManager:
                 )
 
             content = skill.content
-            if len(content) > MAX_SKILL_CONTENT_LENGTH:
-                content = content[:MAX_SKILL_CONTENT_LENGTH] + "\n... (truncated)"
-
-            return f"""
+            header = f"""
 ## Skill: {skill_name}
 
 **Base directory**: {skill.base_dir}
 
-{content}"""
+"""
+            # Cap the ENTIRE response (header + body) at the limit so a huge
+            # skill never floods the agent's context. The previous check
+            # capped only the body, letting the header push the total ~100
+            # chars past MAX_SKILL_CONTENT_LENGTH.
+            if len(header) + len(content) > MAX_SKILL_CONTENT_LENGTH:
+                suffix = "\n... (truncated)"
+                budget = max(0, MAX_SKILL_CONTENT_LENGTH - len(header) - len(suffix))
+                content = content[:budget] + suffix
+            return header + content
+
+        def list_skills_content() -> str:
+            """List the currently-installed skills.
+
+            Reflects skills installed or removed during the conversation (the
+            ``dive_skill`` tool's description is frozen at chat start, so call
+            this to discover skills added since).
+            """
+            current = list(self._skills_cache.values())
+            if not current:
+                return "No skills are currently installed."
+            lines = [f"Installed skills ({len(current)}):"]
+            for s in current:
+                raw = (s.meta.description or "").strip().splitlines()
+                desc = raw[0] if raw else ""
+                lines.append(f"- {s.meta.name}: {desc}".rstrip())
+            return "\n".join(lines)
+
+        def search_skills_content(query: str) -> str:
+            """Search installed skills by keyword across name + description.
+
+            Useful when many skills are installed and ``dive_list_skills`` is
+            too noisy — find the skill whose name/description matches a task
+            before loading it with ``dive_skill``. Reflects mid-conversation
+            installs (reads the live cache).
+            """
+            needle = (query or "").strip().lower()
+            if not needle:
+                return "Error: search query must not be empty."
+            current = list(self._skills_cache.values())
+            matches = [
+                s
+                for s in current
+                if needle in (s.meta.name + " " + (s.meta.description or "")).lower()
+            ]
+            if not matches:
+                return f"No skills match '{query}'."
+            lines = [f"Skills matching '{query}' ({len(matches)}):"]
+            for s in matches:
+                raw = (s.meta.description or "").strip().splitlines()
+                desc = raw[0] if raw else ""
+                lines.append(f"- {s.meta.name}: {desc}".rstrip())
+            return "\n".join(lines)
+
+        def skill_info_content(skill_name: str) -> str:
+            """Return a skill's metadata (name, description, license, etc.)
+            WITHOUT loading the full body — lightweight discovery before
+            ``dive_skill``. Reflects mid-conversation installs (live cache).
+            """
+            skill = self._skills_cache.get(skill_name)
+            if skill is None:
+                available = (
+                    ", ".join(self._skills_cache) if self._skills_cache else "(none)"
+                )
+                return (
+                    f"Error: Skill '{skill_name}' not found. "
+                    f"Installed skills: {available}"
+                )
+            meta = skill.meta
+            lines = [f"## Skill info: {meta.name}"]
+            lines.append(f"**Description:** {meta.description}")
+            if meta.license:
+                lines.append(f"**License:** {meta.license}")
+            if meta.compatibility:
+                lines.append(f"**Compatibility:** {meta.compatibility}")
+            if meta.allowed_tools:
+                lines.append(f"**Allowed tools:** {meta.allowed_tools}")
+            if meta.metadata:
+                lines.append("**Metadata:**")
+                for key, value in meta.metadata.items():
+                    lines.append(f"- {key}: {value}")
+            lines.append(f"**Base directory:** {skill.base_dir}")
+            lines.append("(Use dive_skill to load the full instructions.)")
+            return "\n".join(lines)
 
         return [
             StructuredTool.from_function(
@@ -179,5 +271,36 @@ class SkillManager:
                 name="dive_skill",
                 description=description,
                 args_schema=_DiveSkillInput,
-            )
+            ),
+            StructuredTool.from_function(
+                func=list_skills_content,
+                name="dive_list_skills",
+                description=(
+                    "List all currently-installed skills with their names and "
+                    "descriptions. Use before dive_skill to discover which skills "
+                    "are available right now (reflects skills installed or removed "
+                    "during the conversation)."
+                ),
+            ),
+            StructuredTool.from_function(
+                func=search_skills_content,
+                name="dive_search_skills",
+                description=(
+                    "Search installed skills by keyword across name + description. "
+                    "Returns the matching skills with their first description line. "
+                    "Use when many skills are installed and you need to find the "
+                    "right one for a task (reflects mid-conversation installs)."
+                ),
+                args_schema=_DiveSearchSkillInput,
+            ),
+            StructuredTool.from_function(
+                func=skill_info_content,
+                name="dive_skill_info",
+                description=(
+                    "Get a skill's metadata (name, description, license, allowed "
+                    "tools, base dir) WITHOUT loading the full body. Use for quick "
+                    "discovery before dive_skill. Reflects mid-conversation installs."
+                ),
+                args_schema=_DiveSkillInput,
+            ),
         ]

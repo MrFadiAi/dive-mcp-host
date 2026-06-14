@@ -37,6 +37,7 @@ class DocSearchRetriever:
         query: str,
         top_k: int = 5,
         source_filter: str | None = None,
+        max_distance: float | None = None,
     ) -> list[dict]:
         """Search for relevant document chunks.
 
@@ -44,6 +45,13 @@ class DocSearchRetriever:
             query: Natural language search query.
             top_k: Maximum number of results.
             source_filter: Optional source filename to restrict search.
+            max_distance: Optional relevance ceiling. Results whose vector
+                ``distance`` exceeds this are dropped — a top_k search can
+                return barely-related chunks, and returning those to the LLM as
+                "relevant" (see ``format_results``) misleads it. ``None`` keeps
+                the original behaviour (return everything up to top_k). A result
+                missing the ``distance`` field defaults to 0.0 (treated as
+                maximally relevant) so filtering never silently discards data.
 
         Returns:
             List of result dicts with: source, title, page, text, distance.
@@ -57,6 +65,12 @@ class DocSearchRetriever:
             top_k=top_k,
             source_filter=source_filter,
         )
+
+        # Drop low-relevance chunks when a relevance ceiling is requested.
+        if max_distance is not None:
+            results = [
+                r for r in results if r.get("distance", 0.0) <= max_distance
+            ]
 
         return results
 
