@@ -48,3 +48,10 @@ logs/
 oap_config.json
 oauth_store.json
 .TODO.md
+
+# local agent/test artifacts
+.omc/
+# local agent/test artifacts
+_test_httpd.json
+# local agent/test artifacts
+test_docs/

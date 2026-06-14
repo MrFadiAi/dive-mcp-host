@@ -1,6 +1,7 @@
 """Additional models for the MCP."""
 
 import logging
+import re
 from importlib import import_module
 from typing import Any
 
@@ -10,6 +11,22 @@ from langchain_core.language_models import BaseChatModel
 from dive_mcp_host.models.helpers import clean_model_kwargs
 
 logger = logging.getLogger("dive_mcp_host.models")
+
+# Matches a trailing context-window marker like "[1m]", "[200k]", "[1M]".
+# These are local UI conventions, NOT valid model identifiers for most
+# providers (e.g. z.ai rejects "glm-5.1[1m]" with error 1211
+# "model does not exist"). We strip them before sending to the API but
+# keep them for context-window detection (see conversation_compactor).
+_CONTEXT_SUFFIX_RE = re.compile(r"\s*\[\s*\d+\s*[kKmM]\s*\]\s*$")
+
+
+def _strip_context_suffix(model_name: str) -> str:
+    """Strip a trailing context-window marker (e.g. '[1m]') from a model name.
+
+    The marker is used only locally to signal a larger context window; it must
+    not be sent to the provider's API.
+    """
+    return _CONTEXT_SUFFIX_RE.sub("", model_name).strip()
 
 
 def load_model(
@@ -46,6 +63,15 @@ def load_model(
         provider,
         kwargs,
     )
+    # Strip local context-window markers (e.g. "glm-5.2[1m]" → "glm-5.2")
+    # before sending to the provider API. The marker is a local/UI convention
+    # that most providers reject (z.ai returns 1211 "Unknown Model").
+    # "dive"/"__load__" use model_name as a module/class path — do not strip.
+    api_model_name = (
+        model_name
+        if provider in ("dive", "__load__")
+        else _strip_context_suffix(model_name)
+    )
     if provider == "dive":
         model_name_lower = model_name.replace("-", "_").replace(".", "_").lower()
         model_module = import_module(
@@ -54,7 +80,7 @@ def load_model(
         model = model_module.load_model(*args, **kwargs)
     elif provider == "oap":
         model = init_chat_model(
-            model=model_name,
+            model=api_model_name,
             model_provider="openai",
             **clean_model_kwargs("openai", kwargs),
         )
@@ -69,7 +95,7 @@ def load_model(
                 f"Additional arguments are not supported for {provider} provider.",
             )
         model = init_chat_model(
-            model=model_name,
+            model=api_model_name,
             model_provider=provider,
             **clean_model_kwargs(provider, kwargs),
         )

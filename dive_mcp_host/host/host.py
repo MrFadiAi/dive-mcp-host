@@ -159,6 +159,8 @@ class DiveMcpHost(ContextProtocol):
         volatile: bool = False,
         include_local_tools: bool = False,
         skill_manager: SkillManager | None = None,
+        context_window: int | None = None,
+        oversize_policy: str | None = None,
     ) -> Chat[T]:
         """Start or resume a chat.
 
@@ -218,6 +220,8 @@ class DiveMcpHost(ContextProtocol):
             elicitation_manager=self.elicitation_manager,
             locale=self._tool_plugin.locale,
             skill_manager=skill_manager,
+            context_window=context_window,
+            oversize_policy=oversize_policy,
         )
 
     async def reload(

@@ -3,6 +3,8 @@ from langchain_core.tools import BaseTool
 from dive_mcp_host.internal_tools.tools.bash import bash
 from dive_mcp_host.internal_tools.tools.confirmation import request_confirmation
 from dive_mcp_host.internal_tools.tools.doc_search import search_docs
+from dive_mcp_host.internal_tools.tools.extract_hmi import extract_hmi_screens
+from dive_mcp_host.internal_tools.tools.extract_plc import extract_plc_blocks
 from dive_mcp_host.internal_tools.tools.fetch import fetch
 from dive_mcp_host.internal_tools.tools.file_ops import read_file, write_file
 from dive_mcp_host.internal_tools.tools.mcp_server import (
@@ -35,4 +37,6 @@ def get_local_tools() -> list[BaseTool]:
         request_confirmation,
         install_mcp_instructions,
         search_docs,
+        extract_plc_blocks,
+        extract_hmi_screens,
     ]

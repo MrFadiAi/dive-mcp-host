@@ -232,6 +232,7 @@ class TokenUsageContent(BaseModel):
     time_to_first_token: float = Field(default=0.0, alias="timeToFirstToken")
     tokens_per_second: float = Field(default=0.0, alias="tokensPerSecond")
     model_name: str = Field(alias="modelName")
+    context_window: int | None = Field(default=None, alias="contextWindow")
 
 
 class StreamMessage(BaseModel):
@@ -351,6 +352,14 @@ class ModelFullConfigs(BaseModel):
     # If True, local tools (fetch, bash, read_file, write_file) will be available
     # to the LLM directly without going through the installer agent.
     # Default is True - enabled by default when not specified in config.
+
+    context_window: int | None = None
+    # Token limit for the model's context window. When set, enables auto-compacting:
+    # if the conversation exceeds 80% of this limit, older messages are summarized.
+    # If not set, defaults are inferred from the model name.
+
+    auto_compact: bool = True
+    # If True (default), auto-compact conversations when context window is filling up.
 
     model_config = ConfigDict(
         alias_generator=to_camel,

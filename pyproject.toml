@@ -65,6 +65,9 @@ rag = [
     "pymupdf>=1.25.0",
     "sentence-transformers>=3.0.0",
 ]
+extraction = [
+    "openpyxl>=3.1.0",
+]
 dev = [
     "pproxy",
     "pytest",

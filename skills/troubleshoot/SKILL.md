@@ -26,10 +26,12 @@ Ask the user for (or read from the project if available):
 
 **If the user is vague**, use read-only tools to investigate:
 
-1. `browse_project_tree` — understand project structure
-2. `read_hardware_config` — check configured modules vs actual
-3. `list_blocks` — find diagnostic blocks (OB80–OB87, OB121–OB122)
-4. `get_block_content` on relevant OBs and diagnostic FBs
+1. `list_plcs` — learn the exact PLC names first (device name + PLC-software name)
+2. `list_blocks` — find diagnostic blocks (OB80–OB87, OB121–OB122) without dumping the whole tree
+3. `search_code` — when chasing *where* a signal/fault is handled, grep all block source in one call (e.g. `search_code("OB86")`, `search_code("FAULT")`)
+4. `tag_usage` — trace a specific tag/signal across all blocks (who reads/writes it)
+5. `get_block_content` — read the actual logic once you've located the block
+6. `read_hardware_config` — check configured modules vs actual
 
 ### Phase 2: Information Gathering
 
@@ -37,10 +39,15 @@ Use read-only tools to collect evidence before proposing fixes:
 
 | Tool | What it reveals |
 |------|----------------|
-| `browse_project_tree` | Project structure, PLCs, blocks, tag tables |
+| `list_plcs` | PLC inventory — exact names + block/tag counts (cheapest entry point) |
+| `list_blocks` | Block index for one PLC — find the right block fast, no code |
+| `search_code` | Where a signal/address/keyword appears across ALL block code |
+| `tag_usage` | Every read/write of a specific tag across the PLC |
 | `get_block_content` | Actual logic — trace signal flow through networks |
 | `read_hardware_config` | Module configuration, IP addresses, PROFINET names |
-| `list_tags` | Tag definitions, data types, addresses |
+| `list_tag_tables` | Tag definitions, data types, addresses |
+
+**Prefer `list_plcs` → `list_blocks` → `search_code`/`tag_usage` to *locate* logic.** Reserve `browse_project_tree` for when you need the full nested structure (folders, types, tag-table groups) — it's large and often truncates.
 
 **Always read before suggesting.** If you haven't read the block, you don't know what's in it.
 

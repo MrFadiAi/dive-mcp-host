@@ -7,6 +7,7 @@ import asyncio
 import contextlib
 from asyncio import Event
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
+from logging import getLogger
 from typing import Any, Literal, cast
 from uuid import uuid4
 
@@ -51,6 +52,7 @@ from dive_mcp_host.host.agents.agent_factory import (
     ConfigurableKey,
     initial_messages,
 )
+from dive_mcp_host.host.agents.conversation_compactor import compact_conversation
 from dive_mcp_host.host.agents.file_in_additional_kwargs import FileMsgConverter
 from dive_mcp_host.host.agents.message_order import tool_call_order
 from dive_mcp_host.host.agents.tools_in_prompt import (
@@ -64,6 +66,100 @@ from dive_mcp_host.skills.manager import SkillManager
 
 type StructuredResponse = dict | BaseModel
 type StructuredResponseSchema = dict | type[BaseModel]
+
+logger = getLogger(__name__)
+
+def _model_supports_multimodal(model: BaseChatModel) -> bool:
+    """Check if the model supports multimodal (image) content.
+
+    Returns False for models known to reject non-text content types,
+    True otherwise (assume multimodal support by default).
+
+    GLM naming convention:
+      - Text-only:  glm-5.1, glm-5-turbo, chatglm-turbo
+      - Vision:     glm-5v-turbo, glm-4v  (version segment contains 'v')
+    """
+    model_name = ""
+    # LangChain ChatOpenAI stores model name in model_name or model kwargs
+    if hasattr(model, "model_name"):
+        model_name = model.model_name or ""
+    elif hasattr(model, "model"):
+        model_name = model.model or ""
+
+    model_name_lower = model_name.lower()
+
+    # ChatGLM models are text-only (no vision variants)
+    if model_name_lower.startswith("chatglm"):
+        return False
+
+    # GLM models: check version segment for vision indicator
+    # Convention: glm-{version}v* = vision (e.g., glm-5v-turbo, glm-4v)
+    #             glm-{version}* = text-only (e.g., glm-5.1, glm-5-turbo)
+    if model_name_lower.startswith("glm-"):
+        remainder = model_name_lower[4:]  # e.g., "5v-turbo", "5.1", "5-turbo"
+        version_part = remainder.split("-")[0]  # e.g., "5v", "5.1", "5"
+        # Vision models have 'v' in the version segment (digit + v)
+        return "v" in version_part
+
+    # Default: assume multimodal support
+    return True
+
+
+@RunnableCallable
+def _strip_non_text_content(inpt: ChatPromptValue | list[BaseMessage]) -> list[BaseMessage]:
+    """Strip non-text content from messages for models that don't support multimodal.
+
+    Converts multimodal message content (images, files) to text-only descriptions,
+    preserving the text portions. This prevents API errors from models that only
+    accept text content types (e.g., GLM models returning error 1210).
+    """
+    messages = inpt.to_messages() if isinstance(inpt, ChatPromptValue) else inpt
+
+    result: list[BaseMessage] = []
+    for msg in messages:
+        # Only process messages with list-type content (multimodal format)
+        if not isinstance(msg.content, list):
+            result.append(msg)
+            continue
+
+        text_parts: list[str] = []
+        has_non_text = False
+
+        for item in msg.content:
+            if isinstance(item, str):
+                text_parts.append(item)
+            elif isinstance(item, dict):
+                item_type = item.get("type", "")
+                if item_type == "text":
+                    text_parts.append(item.get("text", ""))
+                elif item_type in ("image", "image_url"):
+                    has_non_text = True
+                    # Add a placeholder so the model knows an image was attached
+                    text_parts.append("[User attached an image]")
+                else:
+                    # Keep other dict content that might be text-like
+                    has_non_text = True
+                    if "text" in item:
+                        text_parts.append(item["text"])
+            else:
+                has_non_text = True
+
+        if not has_non_text:
+            result.append(msg)
+            continue
+
+        # Rebuild the message with text-only content
+        combined_text = "\n".join(text_parts)
+        if isinstance(msg, HumanMessage):
+            result.append(HumanMessage(
+                content=combined_text,
+                id=msg.id,
+                additional_kwargs=msg.additional_kwargs,
+            ))
+        else:
+            result.append(msg)
+
+    return result
 
 
 class AgentState(MessagesState):
@@ -319,6 +415,20 @@ class ChatAgentFactory(AgentFactory[AgentState]):
             else RunnablePassthrough()
         )
 
+        # Check if the model supports multimodal content (images)
+        self._multimodal_supported = _model_supports_multimodal(model)
+
+        # Content filter: strips non-text content for models that don't support multimodal
+        if self._multimodal_supported:
+            self._content_filter: Runnable = RunnablePassthrough()
+        else:
+            logger.info(
+                "Model '%s' does not support multimodal content — "
+                "non-text content will be stripped",
+                self._model_class,
+            )
+            self._content_filter = _strip_non_text_content
+
         # changed when self._build_graph is called
         self._tool_classes: list[BaseTool] = []
         self._should_return_direct: set[str] = set()
@@ -341,7 +451,8 @@ class ChatAgentFactory(AgentFactory[AgentState]):
         user_id: str,
         thread_id: str,
         max_input_tokens: int | None = None,
-        oversize_policy: Literal["window"] | None = None,
+        oversize_policy: Literal["window", "summarize"] | None = None,
+        context_window: int | None = None,
         abort_signal: Event | None = None,
         elicitation_manager: Any | None = None,
         stream_writer: Any | None = None,
@@ -355,6 +466,7 @@ class ChatAgentFactory(AgentFactory[AgentState]):
                 ConfigurableKey.USER_ID: user_id,
                 ConfigurableKey.MAX_INPUT_TOKENS: max_input_tokens,
                 ConfigurableKey.OVERSIZE_POLICY: oversize_policy,
+                "context_window": context_window,
                 ConfigurableKey.ABORT_SIGNAL: abort_signal,
                 ConfigurableKey.ELICITATION_MANAGER: elicitation_manager,
                 ConfigurableKey.STREAM_WRITER: stream_writer,
@@ -419,7 +531,7 @@ class ChatAgentFactory(AgentFactory[AgentState]):
             if self._tool_classes:
                 model = wrapped_model.bind_tools(self._tool_classes)
             model_runnable = (
-                self._prompt | self._file_msg_converter | drop_empty_messages | truncate_tool_results | model
+                self._prompt | self._file_msg_converter | self._content_filter | drop_empty_messages | truncate_tool_results | model
             )
         else:
             model_runnable = (
@@ -427,6 +539,7 @@ class ChatAgentFactory(AgentFactory[AgentState]):
                 | self._tool_prompt
                 | convert_messages
                 | self._file_msg_converter
+                | self._content_filter
                 | drop_empty_messages
                 | truncate_tool_results
                 | InterruptableModel(
@@ -464,16 +577,45 @@ class ChatAgentFactory(AgentFactory[AgentState]):
         response = model_with_structured_output.invoke(messages, config)
         return cast(AgentState, {"structured_response": response})
 
-    def _before_agent(self, state: AgentState, config: RunnableConfig) -> AgentState:
+    async def _before_agent(self, state: AgentState, config: RunnableConfig) -> AgentState:
         configurable = config.get("configurable", {})
         max_input_tokens: int | None = configurable.get("max_input_tokens")
-        oversize_policy: Literal["window"] | None = configurable.get("oversize_policy")
+        oversize_policy: Literal["window", "summarize"] | None = configurable.get("oversize_policy")
+        context_window: int | None = configurable.get("context_window")
 
-        new_messages: list[BaseMessage] = []
-        new_messages.extend(tool_call_order(state["messages"]))
+        ordered = tool_call_order(state["messages"])
 
         if max_input_tokens is None or oversize_policy is None:
-            return cast(AgentState, {"messages": new_messages})
+            return cast(AgentState, {"messages": ordered})
+
+        if oversize_policy == "summarize" and context_window:
+            # Summarization-based compaction: keep a summary of old messages
+            result = await compact_conversation(
+                ordered,
+                self._model,
+                context_window=context_window,
+            )
+            if result.compacted:
+                logger.info(
+                    "Auto-compacted: %d → %d tokens (removed %d messages)",
+                    result.tokens_before,
+                    result.tokens_after,
+                    result.messages_removed,
+                )
+                # Build the state update: remove old messages, add summary + recent
+                remove_messages = [
+                    RemoveMessage(id=m.id)  # type: ignore
+                    for m in ordered
+                    if m not in result.messages
+                ]
+                new_messages: list[BaseMessage] = []
+                # Add the summary and recent messages from compaction result
+                new_messages.extend(result.messages)
+                new_messages.extend(remove_messages)
+                return cast(AgentState, {"messages": new_messages})
+
+            # No compaction needed
+            return cast(AgentState, {"messages": ordered})
 
         if oversize_policy == "window":
             messages: list[BaseMessage] = trim_messages(
@@ -486,6 +628,7 @@ class ChatAgentFactory(AgentFactory[AgentState]):
                 for m in state["messages"]
                 if m not in messages
             ]
+            new_messages = list(ordered)
             new_messages.extend(remove_messages)
             return cast(AgentState, {"messages": new_messages})
 

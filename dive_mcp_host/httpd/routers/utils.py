@@ -61,6 +61,7 @@ from dive_mcp_host.host.store.base import FileType, StoreManagerProtocol
 from dive_mcp_host.host.tools.log import LogEvent, LogManager, LogMsg
 from dive_mcp_host.host.tools.model_types import ClientState
 from dive_mcp_host.httpd.conf.prompt import PromptKey
+from dive_mcp_host.httpd.chat_logger import ChatLogger
 from dive_mcp_host.httpd.database.models import (
     ChatMessage,
     Message,
@@ -395,6 +396,24 @@ class ChatProcessor:
         )
         self.skill_manager = skill_manager
 
+    def _get_context_window(self) -> int | None:
+        """Get the context window size from model config."""
+        full_config = self.app.model_config_manager.full_config
+        if full_config and full_config.context_window:
+            return full_config.context_window
+        # Infer from model name
+        if full_config and self.app.model_config_manager.current_setting:
+            from dive_mcp_host.host.agents.conversation_compactor import get_context_window
+            return get_context_window(self.app.model_config_manager.current_setting.model)
+        return None
+
+    def _should_auto_compact(self) -> bool:
+        """Check if auto-compacting is enabled."""
+        full_config = self.app.model_config_manager.full_config
+        if full_config is None:
+            return False
+        return full_config.auto_compact
+
     async def handle_chat(
         self,
         chat_id: str | None,
@@ -416,7 +435,11 @@ class ChatProcessor:
         title_await = None
         result = ""
 
+        # --- Chat conversation logger for debugging ---
+        self._chat_log = ChatLogger(chat_id)
+
         if regenerate_message_id:
+            self._chat_log.log_retry(regenerate_message_id)
             if query_input:
                 query_message = await self._query_input_to_message(
                     query_input, message_id=regenerate_message_id
@@ -477,6 +500,10 @@ class ChatProcessor:
                         ),
                     ),
                 )
+                self._chat_log.log_user(
+                    query_input.text or "",
+                    files=(query_input.images or []) + (query_input.documents or []),
+                )
             await session.commit()
 
         await self.stream.write(
@@ -504,6 +531,7 @@ class ChatProcessor:
                 if query_message and hasattr(query_message, "id")
                 else None
             )
+            self._chat_log.log_error(str(exc))
             if user_msg_id:
                 # Create placeholder assistant message for retry support
                 async with self.app.db_sessionmaker() as session:
@@ -712,8 +740,28 @@ class ChatProcessor:
                     modelName=ai_message.response_metadata.get("model")
                     or ai_message.response_metadata.get("model_name")
                     or "",
+                    contextWindow=self._get_context_window(),
                 ),
             )
+        )
+
+        # Log assistant response
+        self._chat_log.log_assistant(
+            result,
+            model=ai_message.response_metadata.get("model")
+            or ai_message.response_metadata.get("model_name")
+            or "",
+            tool_calls=[
+                tc.model_dump() if hasattr(tc, "model_dump") else tc
+                for tc in (ai_message.tool_calls or [])
+            ],
+            tokens_in=ai_message.usage_metadata.get("input_tokens", 0)
+            if ai_message.usage_metadata
+            else 0,
+            tokens_out=ai_message.usage_metadata.get("output_tokens", 0)
+            if ai_message.usage_metadata
+            else 0,
+            duration_s=end - start,
         )
 
         return result, token_usage
@@ -738,6 +786,21 @@ class ChatProcessor:
         """
         user_message, ai_message, _, _ = await self._process_chat(
             chat_id, query_input, history, tools
+        )
+
+        # Log for this code path too
+        self._chat_log = ChatLogger(chat_id)
+        if isinstance(query_input, HumanMessage):
+            self._chat_log.log_user(str(query_input.content))
+        self._chat_log.log_assistant(
+            str(ai_message.content),
+            model=ai_message.response_metadata.get("model")
+            or ai_message.response_metadata.get("model_name")
+            or "",
+            tool_calls=[
+                tc.model_dump() if hasattr(tc, "model_dump") else tc
+                for tc in (ai_message.tool_calls or [])
+            ],
         )
 
         # Calculate user message tokens
@@ -821,6 +884,8 @@ class ChatProcessor:
             disable_default_system_prompt=self.disable_dive_system_prompt,
             include_local_tools=self.enable_local_tools,
             skill_manager=self.skill_manager,
+            context_window=self._get_context_window(),
+            oversize_policy="summarize" if self._should_auto_compact() else None,
         )
         async with AsyncExitStack() as stack:
             if chat_id:
@@ -880,6 +945,9 @@ class ChatProcessor:
             logger.debug("Skipping tool_calls - all are installer agent tools")
             return
 
+        for tc in tool_calls:
+            self._chat_log.log_tool_call(tc["name"], tc.get("args"))
+
         await self.stream.write(
             StreamMessage(
                 type="tool_calls",
@@ -897,6 +965,13 @@ class ChatProcessor:
                 result = [json.loads(r) if isinstance(r, str) else r for r in result]
             else:
                 result = json.loads(result)
+        self._chat_log.log_tool_result(
+            message.name or "",
+            json.dumps(result, default=str, ensure_ascii=False)
+            if not isinstance(result, str)
+            else result,
+            is_error=message.status == "error",
+        )
         await self.stream.write(
             StreamMessage(
                 type="tool_result",

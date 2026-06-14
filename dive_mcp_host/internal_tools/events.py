@@ -19,6 +19,8 @@ class InstallerToolLog(CustomEvent):
         "reload_mcp_server",
         "install_mcp_instructions",
         "get_mcp_config",
+        "extract_plc_blocks",
+        "extract_hmi_screens",
     ]
     """The tool that generated this log."""
 

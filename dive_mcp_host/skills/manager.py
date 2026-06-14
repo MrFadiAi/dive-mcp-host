@@ -96,7 +96,7 @@ class SkillManager:
             return None
 
         try:
-            with skill_file.open("r") as f:
+            with skill_file.open("r", encoding="utf-8") as f:
                 post = frontmatter.load(f)
             return Skill(
                 meta=SkillMeta.model_validate(post.metadata),

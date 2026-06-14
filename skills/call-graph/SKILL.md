@@ -3,14 +3,15 @@ name: call-graph
 description: >
   Use when the user asks to visualize call trees, block dependencies, tag usage graphs,
   or any program structure relationship diagram. Generates Mermaid flowcharts from
-  cross-reference data.
+  cross-reference data. Triggers on: "show the call tree", "what calls FB100",
+  "which blocks use the Motor_Start tag", "map the dependencies".
 ---
 
-# Call Graph — Visual Network Diagrams from Cross-References
+# Call Graph — Visual Network Diagrams from References
 
 ## Overview
 
-This skill generates **Mermaid flowchart diagrams** from TIA Portal cross-reference data. It produces visual call trees, tag usage graphs, and block dependency maps directly in the chat.
+Generates **Mermaid flowchart diagrams** from TIA Portal reference data: call trees, tag-usage graphs, and block dependency maps, rendered directly in chat.
 
 ## When to Use
 
@@ -24,26 +25,23 @@ This skill generates **Mermaid flowchart diagrams** from TIA Portal cross-refere
 
 ### Step 1: Identify the scope
 
-Call `browse_project_tree` to find the PLC name and block folder structure. This tells you what blocks exist and where they are organized.
+Call `list_plcs` to learn the exact PLC names (device name + PLC-software name). Then `list_blocks` with the target `plcName` to confirm which blocks exist — this is far cheaper than `browse_project_tree`.
 
-### Step 2: Get cross-reference data
+### Step 2: Gather relationship data — pick by graph type
 
-Call `read_cross_references` with appropriate parameters:
+| Graph you want | Tool to call | Notes |
+|---|---|---|
+| **Tag usage** (who reads/writes a tag) | `tag_usage` first; **escalate to `read_cross_references`** if `skippedProtectedCount > 0` | `tag_usage` works WITHOUT compiling but is blind to know-how-protected blocks. `read_cross_references` reads the COMPILED cross-reference — pierces protection, authoritative read/write locations. |
+| **Where a symbol/address is used** | `search_code` | Greps all EXPORTED block source. Use for addresses (`%Q1515.0`), block names, any pattern. Blind to protected blocks (see `skippedProtectedCount`). |
+| **Block-to-block calls** | `read_cross_references` with filter `ObjectsWithReferences` | Reads the COMPILED call graph — pierces know-how protection, so it sees calls inside protected blocks. Auto-compiles if needed. If it errors ("requires a compiled project" / compile fails), fall back to `search_code` for the block name. |
 
-- **For a specific block's call tree**: Use the PLC name and optionally filter to `ObjectsWithReferences`
-- **For tag usage graph**: Get all references and filter by tag name in the results
-- **For full PLC dependency map**: Get all references without a filter
+> **`tag_usage` and `search_code` grep EXPORTED source text — fast, no compile needed, but BLIND to know-how-protected blocks** (they report `skippedProtectedCount`). Use them first. **When `skippedProtectedCount > 0` and references are 0 (or suspiciously few), ESCALATE to `read_cross_references`** — it reads TIA's COMPILED cross-reference via `CrossReferenceService`, which PIERCES know-how protection and returns the authoritative read/write locations with access classification. It auto-compiles the project if needed. For "which blocks read/write this tag" where blocks are protected, `read_cross_references` is the authoritative source, not a last-resort fallback.
 
 ### Step 3: Extract relationships
 
-From the cross-reference results, filter based on what you need:
-
-| Graph Type | Filter Criteria |
-|---|---|
-| Call tree | `referenceType === "Calls"` — shows which blocks call which blocks |
-| Tag usage | Access type is Read or Write — shows which blocks read/write a specific tag |
-| Data flow | `referenceType === "Operates"` or `referenceType === "Uses"` — shows data dependencies |
-| Full dependency | All reference types combined |
+- **Call tree**: from `search_code('"FB100"')` results, the lines `CALL "FB100"` / `"FB100"( ... )` reveal callers/callees.
+- **Tag usage**: from `tag_usage`, group references by block; `access: write` vs `access: read` distinguishes producers/consumers.
+- **Data flow**: tag references across multiple blocks show the data path.
 
 ### Step 4: Generate Mermaid diagram
 
@@ -52,22 +50,21 @@ Output a fenced code block with `mermaid` language identifier.
 ## Mermaid Syntax Rules
 
 ### Node IDs
-- Must be alphanumeric with underscores only (no spaces, dots, hyphens)
+- Alphanumeric + underscores only (no spaces, dots, hyphens)
 - Use the block name directly when possible: `FB100`, `FC201`, `OB1`
-- For names with spaces or special chars, sanitize: `"Motor Control"` → `Motor_Control`
-- Wrap display labels in square brackets: `FB100["FB100: MotorControl"]`
+- Sanitize special chars: `"Motor Control"` → `Motor_Control`
+- Wrap labels in square brackets: `FB100["FB100: MotorControl"]`
 
 ### Arrow Styles
-- `-->` for direct block calls (solid arrow)
-- `-.->` for data/tag usage (dashed arrow)
-- `==>` for mandatory/primary calls (thick arrow)
+- `-->` direct block calls (solid)
+- `-.->` data/tag usage (dashed)
+- `==>` mandatory/primary calls (thick)
 
-### Graph Directions
-- `flowchart TD` (top-down) for call hierarchies — use this by default
-- `flowchart LR` (left-right) for tag usage chains or data pipelines
+### Directions
+- `flowchart TD` (top-down) for call hierarchies — default
+- `flowchart LR` (left-right) for tag/data chains
 
 ### Styling
-Use `classDef` to color-code block types:
 ```
 classDef ob fill:#4a90d9,stroke:#2c5f8a,color:#fff
 classDef fb fill:#67b279,stroke:#3d7a4a,color:#fff
@@ -77,45 +74,14 @@ classDef db fill:#9b7cb8,stroke:#6b4d88,color:#fff
 
 ## Handling Large Graphs
 
-**If the result has more than 15 nodes:**
-
-1. Show only **depth 2** from the root block (the block asked about + its direct callees + their callees)
-2. Replace deeper subtrees with collapsed placeholder nodes:
-   ```
-   FB100_Subtree["... 8 more blocks under FB100"]
-   ```
-3. Tell the user they can ask to expand specific subtrees:
-   > "Graph truncated to depth 2. Ask 'expand FB100' to see its full call tree."
-
-**If the graph is very small (< 5 nodes):**
-- Show it inline, no special handling needed
+**More than 15 nodes:**
+1. Show only **depth 2** from the root (root + direct callees + their callees)
+2. Collapse deeper subtrees: `FB100_Subtree["... 8 more blocks under FB100"]`
+3. Tell the user they can ask to expand: *"Graph truncated to depth 2. Ask 'expand FB100' for its full call tree."*
 
 ## Graph Types
 
-### Type 1: Call Tree
-
-```
-```mermaid
-flowchart TD
-    classDef ob fill:#4a90d9,stroke:#2c5f8a,color:#fff
-    classDef fb fill:#67b279,stroke:#3d7a4a,color:#fff
-    classDef fc fill:#e8a838,stroke:#b07820,color:#fff
-
-    OB1["OB1: Main"]:::ob
-    FB100["FB100: MotorControl"]:::fb
-    FC200["FC200: AlarmHandler"]:::fc
-    FC201["FC201: Valves"]:::fc
-    FB101["FB101: SafetyCheck"]:::fb
-
-    OB1 --> FB100
-    OB1 --> FC200
-    FB100 --> FC201
-    FB100 --> FB101
-    FC200 --> FB101
-```
-```
-
-### Type 2: Tag Usage Graph
+### Tag Usage Graph (most common)
 
 ```
 ```mermaid
@@ -124,49 +90,44 @@ flowchart LR
     classDef block fill:#74b9ff,stroke:#2c5f8a,color:#fff
 
     Motor_Start["🏷️ Motor_Start"]:::tag
-    Motor_Running["🏷️ Motor_Running"]:::tag
     FB100["FB100: MotorControl"]:::block
     FC200["FC200: Diagnostics"]:::block
 
-    FB100 -.->|Read| Motor_Start
-    FB100 -.->|Write| Motor_Running
-    FC200 -.->|Read| Motor_Running
+    FB100 -.->|Write| Motor_Start
+    FC200 -.->|Read| Motor_Start
 ```
 ```
 
-### Type 3: Full Dependency Map
+### Call Tree
 
-Combine call arrows (`-->`) and data arrows (`-.->`) in one diagram. Use a legend:
 ```
-%% Legend:
-%%  ──▶ Block calls
-%%  ╌╶▶ Data/Tag reference
+```mermaid
+flowchart TD
+    classDef ob fill:#4a90d9,stroke:#2c5f8a,color:#fff
+    classDef fb fill:#67b279,stroke:#3d7a4a,color:#fff
+
+    OB1["OB1: Main"]:::ob
+    FB100["FB100: MotorControl"]:::fb
+
+    OB1 --> FB100
+```
 ```
 
 ## Rules
 
-- **ALWAYS call `read_cross_references`** — do not guess or invent call relationships
-- **Sanitize node IDs** — Mermaid will fail on special characters
-- **Add descriptive labels** — show both block number and name when available
+- **Prefer `tag_usage` / `search_code` for speed** — they need no compile. **But when `skippedProtectedCount > 0` and references are 0/few, ESCALATE to `read_cross_references`** — compiled cross-reference pierces know-how protection and is the authoritative source. It auto-compiles if needed.
+- **Sanitize node IDs** — Mermaid fails on special characters
 - **Color-code by type** — OB=blue, FB=green, FC=orange, DB=purple
-- **Keep graphs readable** — max 15-20 nodes per diagram, collapse deeper levels
-- **Provide a text summary** — always include a brief textual explanation of what the graph shows
-- **Handle empty results** — if no call relationships found, say so clearly instead of generating an empty diagram
+- **Keep graphs readable** — max 15–20 nodes, collapse deeper levels
+- **Always include a text summary** of what the graph shows
+- **Empty results** — say so clearly instead of generating an empty diagram
 
 ## Example Interaction
 
-**User**: "Show me the call tree for OB1 in PLC_1"
+**User**: "Show me which blocks use the Motor_Start tag in PLC_1"
 
 **AI Response**:
-
-1. Calls `browse_project_tree` to confirm PLC_1 structure
-2. Calls `read_cross_references` for PLC_1
-3. Filters to `referenceType === "Calls"` where source is OB1 or callees of OB1
-4. Generates Mermaid flowchart
-5. Adds text summary:
-
-> 📊 **Call Tree for OB1 (PLC_1)**
->
-> [Mermaid diagram renders here]
->
-> **Summary**: OB1 calls 3 blocks directly (FB100 MotorControl, FC200 AlarmHandler, DB_Config). FB100 has the deepest call chain with 4 sub-calls. FB101 SafetyCheck is called by both FB100 and FC200 (shared dependency).
+1. `list_plcs` → confirm PLC_1's exact name
+2. `tag_usage(tag="Motor_Start", plcName="PLC_1")` → references with read/write
+3. Group by block; producers (write) → consumers (read)
+4. Generate Mermaid `flowchart LR` + text summary

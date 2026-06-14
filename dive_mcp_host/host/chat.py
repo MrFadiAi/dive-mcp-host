@@ -53,6 +53,8 @@ class Chat[STATE_TYPE: MessagesState](ContextProtocol):
         elicitation_manager: "ElicitationManager | None" = None,
         locale: str = "en",
         skill_manager: SkillManager | None = None,
+        context_window: int | None = None,
+        oversize_policy: str | None = None,
     ) -> None:
         """Initialize the chat.
 
@@ -68,6 +70,8 @@ class Chat[STATE_TYPE: MessagesState](ContextProtocol):
             elicitation_manager: The elicitation manager for tool approval requests.
             locale: Locale for user-facing messages (e.g., 'en', 'zh-TW').
             skill_manager: Skill related operations
+            context_window: Token limit for the model's context window (enables auto-compacting).
+            oversize_policy: How to handle oversized context: "summarize" or "window".
 
         The agent_factory is called only once to compile the agent.
         """
@@ -84,6 +88,8 @@ class Chat[STATE_TYPE: MessagesState](ContextProtocol):
         self._elicitation_manager = elicitation_manager
         self._locale = locale
         self._skill_manager = skill_manager
+        self._context_window = context_window
+        self._oversize_policy = oversize_policy
 
     @property
     def active_agent(self) -> CompiledStateGraph:
@@ -224,6 +230,8 @@ class Chat[STATE_TYPE: MessagesState](ContextProtocol):
                 elicitation_manager=self._elicitation_manager,
                 locale=self._locale,
                 skill_manager=self._skill_manager,
+                context_window=self._context_window,
+                oversize_policy=self._oversize_policy,
             )
             try:
                 async for response in self.active_agent.astream(
