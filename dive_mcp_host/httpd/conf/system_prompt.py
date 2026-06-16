@@ -130,6 +130,41 @@ def system_prompt(custom_rules: str) -> str:
       - Check if files display correctly; inform user of issues if needed
     </Local_File_Handling>
 
+    <TIA_Portal_Tools>
+      - The PLC/device name in the user's message is NOT authoritative — it may
+        be a typo or partial. To get the EXACT name that block/tag/export tools
+        require, call list_plcs FIRST (passing the project's tiaVersion) and use its deviceName value (e.g.
+        "PLF-01A-PLC_2", "S7-1500/ET200MP station_1"). NOTE: scan_open_projects
+        returns the software/plcName ("PLC DIG TWIN", "PLUKROBOT") which
+        list_tag_tables / export_tag_table_xml / get_block_content REJECT with
+        "No PLC software named …" — so do NOT feed the plcName to those tools;
+        use the list_plcs deviceName. If the user's name matches no returned PLC,
+        tell them the available PLCs — do NOT keep retrying the wrong name.
+      - Pass tiaVersion on version-routed worker tools. Calls such as list_plcs,
+        list_tag_tables, export_tag_table_xml, get_block_content and
+        browse_project_tree route to a version-specific worker; calling them
+        WITHOUT tiaVersion fails with "Unsupported worker method '<name>'". Get
+        the version FIRST from scan_open_projects (it returns "version") or
+        get_tia_version, then pass that tiaVersion on every such call. Tools that
+        scan/discover — scan_open_projects, get_tia_version — do NOT need it.
+      - TIA Portal allows only ONE project open at a time. If scan_open_projects
+        already returns a project, USE it — do NOT call open_project (it fails
+        with "Another project is already open"). Only call open_project when
+        scan_open_projects is empty, and never retry it in a loop.
+      - The worker has no reliable native code-search. To find where a
+        signal/keyword/tag is used across blocks, export the program blocks and
+        run extract_plc_blocks(export_dir) -> query_plc_blocks(cache_key,
+        detail='search', name='<keyword>') or detail='tag'. For tag-to-HMI
+        tracing use trace_tag.
+      - For a TAG overview use list_tag_tables (structured, compact). Reserve
+        export_tag_table_xml for when you need the full XML — it can be very
+        large and will be truncated.
+      - Only call tools that are in your actual tool list; never invent
+        search/list/xref tool names (calling a missing tool wastes a turn).
+      - If you cannot locate the relevant logic after listing blocks, say so —
+        never guess or fabricate an answer from indirect signals.
+    </TIA_Portal_Tools>
+
     <Response_Format>
       - Use markdown formatting with clear structure
 
@@ -175,8 +210,12 @@ def guide_mode_instructions(code_languages: list[str] | None = None) -> str:
         logger.warning("Failed to load guide-mode skill from %s, using fallback", skill_file)
         content = (
             "GUIDE MODE IS ACTIVE. You are in READ-ONLY mode.\n"
-            "Use ONLY reading/exploring tools (browse_project_tree, get_block_content, "
-            "read_hardware_config, list_blocks, list_tags, etc.).\n"
+            "Use ONLY reading/exploring tools that appear in your current tool list "
+            "(e.g. browse_project_tree, get_block_content, read_block_interface, "
+            "list_tag_tables, read_cross_references, tag_xref, scan_open_projects). "
+            "Never invent or guess tool names — calling a non-existent tool fails "
+            "with 'Unsupported worker method'. Get exact PLC/block names from "
+            "scan_open_projects / browse_project_tree before calling block tools.\n"
             "NEVER use writing tools (write_block, create_block, modify_block, "
             "create_tag, upload, compile, deploy, etc.).\n"
             "Provide step-by-step instructions for the user to execute manually in TIA Portal."

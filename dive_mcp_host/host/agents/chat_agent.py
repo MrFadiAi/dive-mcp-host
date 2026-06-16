@@ -5,6 +5,7 @@ It uses langgraph.prebuilt.create_react_agent to create the agent.
 
 import asyncio
 import contextlib
+import os
 from asyncio import Event
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
 from logging import getLogger
@@ -51,6 +52,7 @@ from dive_mcp_host.host.agents.agent_factory import (
     AgentFactory,
     ConfigurableKey,
     initial_messages,
+    resolve_recursion_limit,
 )
 from dive_mcp_host.host.agents.conversation_compactor import compact_conversation
 from dive_mcp_host.host.agents.file_in_additional_kwargs import FileMsgConverter
@@ -473,7 +475,7 @@ class ChatAgentFactory(AgentFactory[AgentState]):
                 ConfigurableKey.LOCALE: locale,
                 ConfigurableKey.SKILL_MANAGER: skill_manager,
             },
-            "recursion_limit": 102,
+            "recursion_limit": resolve_recursion_limit(),
         }
 
     def _check_more_steps_needed(
@@ -786,7 +788,27 @@ def drop_empty_messages(inpt: ChatPromptValue | list[BaseMessage]) -> list[BaseM
     return result
 
 
-MAX_TOOL_RESULT_CHARS = 15_000  # ~3-4K tokens per tool result
+# Default per-tool-result char cap (truncation to protect the context window).
+# Raised from the old 15K: large TIA exports (tag tables, FB/FC source) were cut
+# at 15K, losing data the user explicitly asked for. The conversation auto-
+# compactor backstops context overflow. Override via DIVE_MAX_TOOL_RESULT_CHARS.
+DEFAULT_MAX_TOOL_RESULT_CHARS = 40_000
+
+
+def resolve_max_tool_result_chars() -> int:
+    """Resolve the per-tool-result truncation cap from the env, with a safe default.
+
+    Override with DIVE_MAX_TOOL_RESULT_CHARS. Non-numeric or too-small values
+    (< 1_000) fall back to the default so a bad override can't disable the guard.
+    """
+    raw = os.getenv("DIVE_MAX_TOOL_RESULT_CHARS")
+    if not raw:
+        return DEFAULT_MAX_TOOL_RESULT_CHARS
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_MAX_TOOL_RESULT_CHARS
+    return value if value >= 1000 else DEFAULT_MAX_TOOL_RESULT_CHARS
 
 
 @RunnableCallable
@@ -799,6 +821,7 @@ def truncate_tool_results(inpt: ChatPromptValue | list[BaseMessage]) -> list[Bas
     This truncates each tool result to 15K chars (~3-4K tokens) before the
     model sees it, keeping full data in the database.
     """
+    limit = resolve_max_tool_result_chars()
     messages = inpt.to_messages() if isinstance(inpt, ChatPromptValue) else inpt
 
     result = []
@@ -806,12 +829,12 @@ def truncate_tool_results(inpt: ChatPromptValue | list[BaseMessage]) -> list[Bas
         if (
             isinstance(message, ToolMessage)
             and isinstance(message.content, str)
-            and len(message.content) > MAX_TOOL_RESULT_CHARS
+            and len(message.content) > limit
         ):
             truncated = (
-                message.content[:MAX_TOOL_RESULT_CHARS]
+                message.content[:limit]
                 + f"\n\n... [TRUNCATED: {len(message.content):,} chars total, "
-                f"showing first {MAX_TOOL_RESULT_CHARS:,}. "
+                f"showing first {limit:,}. "
                 f"Use specific tool calls to get details on individual items.]"
             )
             result.append(

@@ -1,3 +1,4 @@
+import os
 from asyncio import Event
 from collections.abc import Callable
 from enum import StrEnum
@@ -20,6 +21,30 @@ if TYPE_CHECKING:
     from dive_mcp_host.skills.manager import SkillManager
 
 logger = getLogger(__name__)
+
+
+# Default langgraph recursion_limit (max agent steps per turn). Raised from the
+# old hardcoded 102 — deep TIA Portal investigations exceeded it and the agent
+# stopped mid-task ("Sorry, need more steps..."), forcing the user to type
+# 'continue'. Tune via the DIVE_AGENT_RECURSION_LIMIT env var.
+DEFAULT_RECURSION_LIMIT = 200
+
+
+def resolve_recursion_limit() -> int:
+    """Resolve the langgraph recursion_limit from the env, with a safe default.
+
+    Override with DIVE_AGENT_RECURSION_LIMIT. Non-numeric or too-small values
+    (< 10) fall back to DEFAULT_RECURSION_LIMIT so a bad override can't brick
+    the agent.
+    """
+    raw = os.getenv("DIVE_AGENT_RECURSION_LIMIT")
+    if not raw:
+        return DEFAULT_RECURSION_LIMIT
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_RECURSION_LIMIT
+    return value if value >= 10 else DEFAULT_RECURSION_LIMIT
 
 
 class ConfigurableKey(StrEnum):
@@ -168,7 +193,7 @@ class AgentFactory[T: MessagesState](Protocol):
                 "thread_id": thread_id,
                 "user_id": user_id,
             },
-            "recursion_limit": 100,
+            "recursion_limit": "<default 200, override via DIVE_AGENT_RECURSION_LIMIT>",
         }
         """
         return {
@@ -183,7 +208,7 @@ class AgentFactory[T: MessagesState](Protocol):
                 ConfigurableKey.LOCALE: locale,
                 ConfigurableKey.SKILL_MANAGER: skill_manager,
             },
-            "recursion_limit": 102,
+            "recursion_limit": resolve_recursion_limit(),
         }
 
     def create_initial_state(
