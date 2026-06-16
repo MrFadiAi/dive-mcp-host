@@ -14,6 +14,7 @@ class InstallerToolLog(CustomEvent):
         "bash",
         "fetch",
         "write_file",
+        "edit_file",
         "read_file",
         "add_mcp_server",
         "reload_mcp_server",

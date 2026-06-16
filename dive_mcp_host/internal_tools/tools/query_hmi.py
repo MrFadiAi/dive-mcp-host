@@ -33,7 +33,9 @@ logger = logging.getLogger(__name__)
         "'screens' (list all screens + element counts); "
         "'orphans' (screens with no inbound navigation — unreachable candidates); "
         "'screen' + screen_name (elements, tag bindings hmi->plc, JS events, navigation); "
-        "'tag' + tag_name (which screens use the PLC tag + connection/data type). "
+        "'tag' + tag_name (which screens use the PLC tag + connection/data type); "
+        "'mermaid' + optional screen_name (navigation graph as a Mermaid flowchart — "
+        "omit the name for the whole graph, or pass a root to focus its sub-tree). "
         "Use this instead of re-running extract_hmi_screens for any question about an "
         "already-extracted HMI project."
     )

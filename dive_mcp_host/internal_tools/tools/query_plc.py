@@ -35,7 +35,11 @@ logger = logging.getLogger(__name__)
         "'calls' + block_name (what a block calls); "
         "'callers' + block_name (who calls a block); "
         "'tag' + tag_name (every block that reads/writes the tag); "
-        "'search' + term (free-text grep across all reconstructed block code). "
+        "'search' + term (free-text grep across all reconstructed block code); "
+        "'path' + block_name (call chain from an entry OB down to the block); "
+        "'mermaid' + optional block_name (call graph as a Mermaid flowchart — "
+        "omit the name for the whole graph from OBs, or pass a root to focus its sub-tree); "
+        "'cycles' (mutually-recursive call-cycle groups + self-recursive blocks — PLC anti-pattern check). "
         "Use this instead of re-running extract_plc_blocks for any question about an "
         "already-extracted project."
     )

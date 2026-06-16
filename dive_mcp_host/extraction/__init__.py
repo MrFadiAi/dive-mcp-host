@@ -22,6 +22,7 @@ __all__ = [
     "parse_hmi_project",
     "cache_result",
     "get_cached",
+    "cache_snapshot",
 ]
 
 # ---------------------------------------------------------------------------
@@ -85,3 +86,27 @@ def list_cache_keys() -> list[str]:
     """List all active cache keys (for debugging)."""
     with _cache_lock:
         return list(_cache.keys())
+
+
+def cache_snapshot() -> list[dict]:
+    """Return a snapshot of active cache entries: ``[{key, type, age_seconds}]``.
+
+    ``type`` is the stored result's class name (``PlcExtraction`` /
+    ``HmiExtraction``); ``age_seconds`` is seconds since the entry was cached.
+    Stale entries (past the TTL) are excluded. Sorted by key.
+    """
+    now = time.time()
+    snapshot: list[dict] = []
+    with _cache_lock:
+        for key, (ts, result) in _cache.items():
+            if now - ts > _CACHE_TTL:
+                continue
+            snapshot.append(
+                {
+                    "key": key,
+                    "type": type(result).__name__,
+                    "age_seconds": int(now - ts),
+                }
+            )
+    snapshot.sort(key=lambda entry: entry["key"])
+    return snapshot

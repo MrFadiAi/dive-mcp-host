@@ -9,9 +9,19 @@ whole HMI project.
 
 from __future__ import annotations
 
+from collections import deque
+
 from dive_mcp_host.extraction.models import HmiExtraction, ScreenResult
 
-_VALID_DETAILS = ("summary", "navigation", "screens", "screen", "tag", "orphans")
+_VALID_DETAILS = (
+    "summary",
+    "navigation",
+    "screens",
+    "screen",
+    "tag",
+    "orphans",
+    "mermaid",
+)
 
 # Output caps to avoid flooding the agent's context.
 _MAX_SCREEN_ELEMENTS = 50
@@ -125,6 +135,48 @@ def _format_screen(screen: ScreenResult) -> str:
     return "\n".join(lines)
 
 
+def _mermaid_navigation(
+    extraction: HmiExtraction, root: str | None = None, max_nodes: int = 60
+) -> str | None:
+    """Render the screen-navigation graph (or a focused sub-tree reachable from
+    ``root``) as a Mermaid flowchart. BFS over ``navigation_map`` (screen ->
+    targets), node-capped, with sanitized node IDs (screen names can contain
+    chars invalid as Mermaid IDs). Returns ``None`` when ``root`` is given but
+    not found (caller emits a message)."""
+    nav = extraction.navigation_map
+    if root:
+        screen = _find_screen(extraction, root)
+        if screen is None:
+            return None
+        starts = [screen.screen_name]
+    else:
+        # All source screens; fall back to the first few screens if none link.
+        starts = sorted(nav.keys()) or [
+            s.screen_name for s in extraction.screens[:5]
+        ]  # all source screens, or the first few screens when nothing links
+
+    nodes: set[str] = set(starts)
+    edges: list[tuple[str, str]] = []
+    queue: deque[str] = deque(starts)
+    while queue and len(nodes) < max_nodes:
+        current = queue.popleft()
+        for target in nav.get(current, []):
+            edges.append((current, target))
+            if target not in nodes and len(nodes) < max_nodes:
+                nodes.add(target)
+                queue.append(target)
+
+    id_for = {name: f"n{i}" for i, name in enumerate(sorted(nodes))}
+    lines = ["```mermaid", "graph TD"]
+    for name in sorted(nodes):
+        lines.append(f'    {id_for[name]}["{name}"]')
+    for src, dst in edges:
+        if src in id_for and dst in id_for:
+            lines.append(f"    {id_for[src]} --> {id_for[dst]}")
+    lines.append("```")
+    return "\n".join(lines)
+
+
 def format_hmi_query(
     extraction: HmiExtraction, detail: str, name: str | None = None
 ) -> str:
@@ -201,6 +253,19 @@ def format_hmi_query(
             "start screen, the rest are genuinely unreachable.)"
         )
         return "\n".join(lines)
+
+    if normalized == "mermaid":
+        # Optional name = root screen; render the navigation sub-tree reachable
+        # from it (or the whole graph when omitted) as a Mermaid flowchart.
+        root = name.strip() if name else None
+        rendered = _mermaid_navigation(extraction, root=root)
+        if rendered is None:
+            return (
+                f"Screen '{name}' not found. "
+                f"Available screens (first {_MAX_SUGGESTIONS}): "
+                f"{_available_screens(extraction)}"
+            )
+        return rendered
 
     # screen / tag require a name
     if not name or not name.strip():

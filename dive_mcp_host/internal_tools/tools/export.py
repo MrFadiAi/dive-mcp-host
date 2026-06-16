@@ -6,10 +6,19 @@ from dive_mcp_host.internal_tools.tools.doc_search import list_indexed_docs, sea
 from dive_mcp_host.internal_tools.tools.extract_hmi import extract_hmi_screens
 from dive_mcp_host.internal_tools.tools.extract_plc import extract_plc_blocks
 from dive_mcp_host.internal_tools.tools.fetch import fetch
+from dive_mcp_host.internal_tools.tools.file_tree import file_tree
+from dive_mcp_host.internal_tools.tools.find_files import find_files
+from dive_mcp_host.internal_tools.tools.edit_file import edit_file
 from dive_mcp_host.internal_tools.tools.file_ops import read_file, write_file
 from dive_mcp_host.internal_tools.tools.list_dir import list_dir
+from dive_mcp_host.internal_tools.tools.list_extraction_cache import (
+    list_extraction_cache,
+)
 from dive_mcp_host.internal_tools.tools.query_hmi import query_hmi_screens
 from dive_mcp_host.internal_tools.tools.query_plc import query_plc_blocks
+from dive_mcp_host.internal_tools.tools.coverage_gap import coverage_gap
+from dive_mcp_host.internal_tools.tools.search_files import search_files
+from dive_mcp_host.internal_tools.tools.trace_tag import trace_tag
 from dive_mcp_host.internal_tools.tools.mcp_server import (
     add_mcp_server,
     get_mcp_config,
@@ -39,7 +48,11 @@ def get_local_tools() -> list[BaseTool]:
         bash,
         read_file,
         write_file,
+        edit_file,
         list_dir,
+        search_files,
+        file_tree,
+        find_files,
         get_mcp_config,
         add_mcp_server,
         reload_mcp_server,
@@ -51,6 +64,9 @@ def get_local_tools() -> list[BaseTool]:
         extract_hmi_screens,
         query_plc_blocks,
         query_hmi_screens,
+        list_extraction_cache,
+        trace_tag,
+        coverage_gap,
         dive_create_skill,
         dive_install_skill_from_path,
         dive_uninstall_skill,

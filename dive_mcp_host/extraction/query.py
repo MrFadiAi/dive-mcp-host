@@ -11,6 +11,9 @@ could read the cache, so every follow-up re-parsed the exported XML.
 
 from __future__ import annotations
 
+from collections import deque
+from typing import Any
+
 from dive_mcp_host.extraction.models import BlockInterface, BlockResult, PlcExtraction
 
 _VALID_DETAILS = (
@@ -22,6 +25,9 @@ _VALID_DETAILS = (
     "summary",
     "dead_code",
     "search",
+    "path",
+    "mermaid",
+    "cycles",
 )
 
 # Cap reconstructed code shown for a single block to avoid flooding context.
@@ -133,6 +139,131 @@ def _format_tag_usage(name: str, info: object) -> str:
     return "\n".join(lines)
 
 
+def _mermaid_call_graph(
+    extraction: PlcExtraction, root: str | None = None, max_nodes: int = 60
+) -> str | None:
+    """Render the call graph (or a focused sub-tree from ``root``) as a Mermaid
+    flowchart. BFS over ``call_tree``, node-capped, with sanitized node IDs
+    (block names can contain chars that are invalid as Mermaid IDs). Returns
+    ``None`` when ``root`` is given but not found (caller emits a message)."""
+    if root:
+        block = _find_block(extraction, root)
+        if block is None:
+            return None
+        starts = [block.block_name]
+    else:
+        starts = [b.block_name for b in extraction.blocks if b.block_type == "OB"]
+        if not starts:
+            starts = [b.block_name for b in extraction.blocks[:5]]
+
+    nodes: set[str] = set(starts)
+    edges: list[tuple[str, str]] = []
+    queue: deque[str] = deque(starts)
+    while queue and len(nodes) < max_nodes:
+        current = queue.popleft()
+        for callee in extraction.call_tree.get(current, []):
+            edges.append((current, callee))
+            if callee not in nodes and len(nodes) < max_nodes:
+                nodes.add(callee)
+                queue.append(callee)
+
+    id_for = {name: f"n{i}" for i, name in enumerate(sorted(nodes))}
+    lines = ["```mermaid", "graph TD"]
+    for name in sorted(nodes):
+        lines.append(f'    {id_for[name]}["{name}"]')
+    for src, dst in edges:
+        if src in id_for and dst in id_for:
+            lines.append(f"    {id_for[src]} --> {id_for[dst]}")
+    lines.append("```")
+    return "\n".join(lines)
+
+
+def _tarjan_scc(graph: dict[str, list[str]]) -> list[list[str]]:
+    """Return strongly-connected components of a directed graph (Tarjan, iterative).
+
+    ``graph`` maps each node to its successor list. Iterative (no recursion
+    limit) so a deep call graph can't blow the stack. Each SCC is returned as a
+    list of node names (order within a component is traversal order, not
+    sorted). Used to find mutually-recursive call-cycle groups (SCCs of size
+    >= 2).
+    """
+    index: dict[str, int] = {}
+    low: dict[str, int] = {}
+    on_stack: dict[str, bool] = {}
+    stack: list[str] = []
+    counter = [0]
+    sccs: list[list[str]] = []
+
+    for root in graph:
+        if root in index:
+            continue
+        index[root] = low[root] = counter[0]
+        counter[0] += 1
+        stack.append(root)
+        on_stack[root] = True
+        # work stack holds (node, successor-iterator) so a node's successors
+        # resume exactly where they left off after a child subtree completes.
+        work: list[tuple[str, Any]] = [(root, iter(graph[root]))]
+        while work:
+            node, succ_iter = work[-1]
+            descended = False
+            for w in succ_iter:
+                if w not in index:
+                    index[w] = low[w] = counter[0]
+                    counter[0] += 1
+                    stack.append(w)
+                    on_stack[w] = True
+                    work.append((w, iter(graph[w])))
+                    descended = True
+                    break
+                if on_stack.get(w):
+                    low[node] = min(low[node], index[w])
+            if descended:
+                continue
+            # All successors processed — pop this node's SCC if it is a root.
+            if low[node] == index[node]:
+                comp: list[str] = []
+                while True:
+                    w = stack.pop()
+                    on_stack[w] = False
+                    comp.append(w)
+                    if w == node:
+                        break
+                sccs.append(comp)
+            work.pop()
+            if work:
+                parent = work[-1][0]
+                low[parent] = min(low[parent], low[node])
+    return sccs
+
+
+def _find_call_cycles(
+    extraction: PlcExtraction,
+) -> tuple[list[list[str]], list[str]]:
+    """Detect recursion in the call graph.
+
+    Returns ``(groups, self_loops)``:
+      - ``groups``: mutually-recursive block groups — SCCs of size >= 2, each a
+        sorted name list (the whole group calls back into itself).
+      - ``self_loops``: blocks that call themselves directly (sorted).
+    Calls to names not in ``extraction.blocks`` (external/library blocks) are
+    ignored so they can't form phantom cycles.
+    """
+    known = {b.block_name for b in extraction.blocks}
+    graph: dict[str, list[str]] = {}
+    for block in extraction.blocks:
+        callees = extraction.call_tree.get(block.block_name) or block.calls or []
+        graph[block.block_name] = [c for c in callees if c in known]
+
+    sccs = _tarjan_scc(graph)
+    groups = sorted(
+        (sorted(s) for s in sccs if len(s) >= 2),
+        key=lambda g: g,
+    )
+    self_loops = sorted(n for n, callees in graph.items() if n in callees)
+    return groups, self_loops
+
+
 def format_plc_query(
     extraction: PlcExtraction, detail: str, name: str | None = None
 ) -> str:
@@ -230,6 +361,42 @@ def format_plc_query(
                 lines.append(f"    {hit.strip()}")
         return "\n".join(lines)
 
+    if normalized == "mermaid":
+        # Optional name = root block; render the call sub-tree from it (or the
+        # whole graph from OBs when omitted) as a Mermaid flowchart.
+        root = name.strip() if name else None
+        rendered = _mermaid_call_graph(extraction, root=root)
+        if rendered is None:
+            return (
+                f"Block '{name}' not found. "
+                f"Available blocks (first {_MAX_SUGGESTIONS}): "
+                f"{_available_blocks(extraction)}"
+            )
+        return rendered
+
+    if normalized == "cycles":
+        # Mutually-recursive call-cycle groups (SCCs >= 2) + self-recursive
+        # blocks. Cyclic FB/FC calls are a PLC anti-pattern (scan-time issues /
+        # compiler-blocked), so this is commissioning-relevant.
+        groups, self_loops = _find_call_cycles(extraction)
+        if not groups and not self_loops:
+            return "No call cycles found — the call graph is acyclic (no mutual recursion)."
+        lines: list[str] = []
+        if groups:
+            lines.append(
+                f"## Call cycles (mutually-recursive block groups): {len(groups)}"
+            )
+            for group in groups:
+                lines.append(f"- {' <-> '.join(group)}")
+        if self_loops:
+            lines.append(f"## Self-recursive blocks (call themselves): {len(self_loops)}")
+            lines.append(", ".join(self_loops))
+        lines.append(
+            "\n(Cyclic FB/FC calls are a PLC anti-pattern — they can cause "
+            "scan-time issues or are rejected by the compiler. Review these.)"
+        )
+        return "\n".join(lines)
+
     # block / calls / callers / tag all require a name
     if not name or not name.strip():
         return (
@@ -251,6 +418,36 @@ def format_plc_query(
                 f"Available (first {_MAX_SUGGESTIONS}): {_available_tags(extraction)}"
             )
         return _format_tag_usage(target, info)
+
+    if normalized == "path":
+        # Trace a call chain from a no-caller entry point (an OB) down to the
+        # target by walking called_by upward (BFS, shortest path). Multi-hop
+        # complement to 'callers' (1-hop). Cycle-safe via a visited set.
+        block = _find_block(extraction, target)
+        if block is None:
+            return (
+                f"Block '{target}' not found. "
+                f"Available blocks (first {_MAX_SUGGESTIONS}): "
+                f"{_available_blocks(extraction)}"
+            )
+        start = block.block_name
+        queue: deque[list[str]] = deque([[start]])
+        visited = {start}
+        found: list[str] | None = None
+        while queue:
+            path = queue.popleft()
+            callers = extraction.called_by.get(path[-1], [])
+            if not callers:
+                found = path
+                break
+            for caller in callers:
+                if caller not in visited:
+                    visited.add(caller)
+                    queue.append(path + [caller])
+        if found is None:
+            return f"No entry-point path to {start} found (cycle or no OB root)."
+        chain = " -> ".join(reversed(found))
+        return f"## Call path to {start} ({len(found)} block(s))\n{chain}"
 
     # block / calls / callers all key off a block
     block = _find_block(extraction, target)

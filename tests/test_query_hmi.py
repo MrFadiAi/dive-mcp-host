@@ -275,3 +275,62 @@ def test_query_hmi_screens_is_registered() -> None:
     from dive_mcp_host.internal_tools.tools.export import get_local_tools
 
     assert "query_hmi_screens" in {t.name for t in get_local_tools()}
+
+
+# --- mermaid: navigation graph visualization (TIA feature) ---
+
+
+def test_mermaid_renders_full_navigation_graph() -> None:
+    """Render the whole navigation_map (screen -> targets) as a Mermaid
+    flowchart — every source screen and every reachable target is a node."""
+    out = format_hmi_query(_sample_extraction(), "mermaid")
+    assert "```mermaid" in out
+    assert "graph TD" in out
+    assert "Main" in out and "Operate" in out
+    assert "-->" in out  # navigation edges present
+
+
+def test_mermaid_focused_subtree_from_root() -> None:
+    """With name=root, render only the navigation sub-tree reachable from that
+    screen (BFS) — upstream screens are excluded."""
+    out = format_hmi_query(
+        HmiExtraction(
+            summary=HmiSummary(total_screens=4),
+            screens=[
+                ScreenResult(screen_name="Home", file="h.rdf", element_count=1),
+                ScreenResult(screen_name="Setup", file="s.rdf", element_count=1),
+                ScreenResult(screen_name="Tune", file="t.rdf", element_count=1),
+                ScreenResult(screen_name="Diag", file="d.rdf", element_count=1),
+            ],
+            # Home -> Setup -> Tune; Diag is a sibling of Home (not reachable from Setup)
+            navigation_map={
+                "Home": ["Setup", "Diag"],
+                "Setup": ["Tune"],
+                "Tune": [],
+                "Diag": [],
+            },
+        ),
+        "mermaid",
+        "Setup",
+    )
+    assert "Setup" in out and "Tune" in out
+    assert "Home" not in out  # upstream of the root — excluded
+    assert "Diag" not in out  # sibling branch — not reachable from Setup
+
+
+def test_mermaid_empty_navigation_is_valid() -> None:
+    """Screens with no navigation links still render a valid (edge-less) block."""
+    extraction = HmiExtraction(
+        summary=HmiSummary(total_screens=1),
+        screens=[ScreenResult(screen_name="Only", file="o.rdf", element_count=1)],
+    )
+    out = format_hmi_query(extraction, "mermaid")
+    assert "```mermaid" in out
+    assert "Only" in out
+
+
+def test_mermaid_unknown_root_lists_available() -> None:
+    out = format_hmi_query(_sample_extraction(), "mermaid", "Nope")
+    assert "not found" in out.lower()
+    assert "Main" in out and "Operate" in out  # suggestions
+

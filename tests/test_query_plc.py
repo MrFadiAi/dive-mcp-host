@@ -275,6 +275,96 @@ def test_search_requires_a_term() -> None:
     assert "Error" in out
 
 
+# --- path: call-chain tracing from an entry OB to a target (TIA feature) ---
+
+
+def _path_extraction() -> PlcExtraction:
+    return PlcExtraction(
+        summary=PlcSummary(),
+        blocks=[
+            BlockResult(block_name="OB1", block_type="OB", block_number=1),
+            BlockResult(block_name="FC10", block_type="FC", block_number=10),
+            BlockResult(block_name="FC20", block_type="FC", block_number=20),
+            BlockResult(block_name="FC30", block_type="FC", block_number=30),
+        ],
+        called_by={"FC10": ["OB1"], "FC20": ["FC10"], "FC30": ["FC20"]},
+        call_tree={"OB1": ["FC10"], "FC10": ["FC20"], "FC20": ["FC30"]},
+    )
+
+
+def test_path_traces_chain_from_entry_to_target() -> None:
+    """Multi-hop complement to 'callers' (1-hop): walk called_by up to a
+    no-caller entry (OB) and return the chain entry -> ... -> target."""
+    out = format_plc_query(_path_extraction(), "path", "FC30")
+    assert "OB1" in out and "FC10" in out and "FC20" in out and "FC30" in out
+    assert "->" in out
+    # the chain itself reads entry -> ... -> target (header also names the target)
+    assert "OB1 -> FC10 -> FC20 -> FC30" in out
+
+
+def test_path_for_entry_block_is_just_itself() -> None:
+    out = format_plc_query(_path_extraction(), "path", "OB1")
+    assert "OB1" in out
+
+
+def test_path_unknown_block_lists_available() -> None:
+    out = format_plc_query(_path_extraction(), "path", "FB999")
+    assert "not found" in out.lower()
+
+
+def test_path_cycle_without_entry_terminates_cleanly() -> None:
+    """A<->B call cycle with no OB entry must not hang; it returns a clean
+    'no entry-point path' message (BFS visited-set bounds the walk)."""
+    extraction = PlcExtraction(
+        summary=PlcSummary(),
+        blocks=[
+            BlockResult(block_name="A", block_type="FC", block_number=1),
+            BlockResult(block_name="B", block_type="FC", block_number=2),
+        ],
+        called_by={"A": ["B"], "B": ["A"]},
+        call_tree={"A": ["B"], "B": ["A"]},
+    )
+    out = format_plc_query(extraction, "path", "A")
+    assert "No entry-point path" in out
+
+
+def test_path_requires_a_target() -> None:
+    out = format_plc_query(_path_extraction(), "path", None)
+    assert "Error" in out
+
+
+# --- mermaid: call-graph visualization (TIA feature) ---
+
+
+def test_mermaid_renders_full_call_graph() -> None:
+    out = format_plc_query(_path_extraction(), "mermaid")
+    assert "```mermaid" in out
+    assert "graph TD" in out
+    assert "OB1" in out and "FC30" in out
+    assert "-->" in out  # edges present
+
+
+def test_mermaid_focused_subtree_from_root() -> None:
+    """With name=root, render only the call sub-tree below that root."""
+    out = format_plc_query(_path_extraction(), "mermaid", "FC20")
+    assert "FC20" in out and "FC30" in out
+    assert "OB1" not in out  # upstream blocks excluded
+
+
+def test_mermaid_empty_call_tree_is_valid() -> None:
+    extraction = PlcExtraction(
+        summary=PlcSummary(),
+        blocks=[BlockResult(block_name="OB1", block_type="OB", block_number=1)],
+    )
+    out = format_plc_query(extraction, "mermaid")
+    assert "```mermaid" in out  # valid block even with no edges
+
+
+def test_mermaid_unknown_root_lists_available() -> None:
+    out = format_plc_query(_path_extraction(), "mermaid", "FB999")
+    assert "not found" in out.lower()
+
+
 # --- End-to-end: the query_plc_blocks tool reading the real cache ---
 
 
@@ -334,4 +424,92 @@ def test_query_plc_blocks_is_registered() -> None:
     from dive_mcp_host.internal_tools.tools.export import get_local_tools
 
     assert "query_plc_blocks" in {t.name for t in get_local_tools()}
+
+
+# --- cycles: call-graph cycle detection (TIA feature) ---
+
+
+def _cyclic_extraction(
+    call_tree: dict, *, blocks: list[str] | None = None
+) -> PlcExtraction:
+    """Build a minimal extraction with the given call_tree. Block list defaults
+    to every node mentioned in the tree."""
+    names = set(call_tree.keys())
+    for callees in call_tree.values():
+        names.update(callees)
+    if blocks is not None:
+        names = set(blocks)
+    return PlcExtraction(
+        summary=PlcSummary(),
+        blocks=[
+            BlockResult(block_name=n, block_type="FC", block_number=i)
+            for i, n in enumerate(sorted(names))
+        ],
+        call_tree=call_tree,
+    )
+
+
+def test_cycles_detects_mutual_recursion() -> None:
+    """A<->B (A calls B, B calls A) is one mutually-recursive group."""
+    out = format_plc_query(
+        _cyclic_extraction({"A": ["B"], "B": ["A"]}), "cycles"
+    )
+    assert "Call cycles" in out
+    assert "A" in out and "B" in out
+
+
+def test_cycles_detects_three_node_cycle() -> None:
+    """A->B->C->A is one group of three."""
+    out = format_plc_query(
+        _cyclic_extraction({"A": ["B"], "B": ["C"], "C": ["A"]}), "cycles"
+    )
+    assert "A" in out and "B" in out and "C" in out
+
+
+def test_cycles_detects_self_loop() -> None:
+    """A block that calls itself is self-recursive (not a multi-node group)."""
+    out = format_plc_query(_cyclic_extraction({"A": ["A"]}), "cycles")
+    assert "Self-recursive" in out
+    assert "A" in out
+
+
+def test_cycles_acyclic_graph_reports_none() -> None:
+    """A DAG (A->B->C, no back edge) has no cycles."""
+    out = format_plc_query(
+        _cyclic_extraction({"A": ["B"], "B": ["C"], "C": []}), "cycles"
+    )
+    assert "No call cycles" in out
+
+
+def test_cycles_separates_disjoint_groups() -> None:
+    """Two disconnected cycles (A<->B and C<->D) yield two groups."""
+    out = format_plc_query(
+        _cyclic_extraction(
+            {"A": ["B"], "B": ["A"], "C": ["D"], "D": ["C"]}
+        ),
+        "cycles",
+    )
+    assert "2" in out  # two groups reported
+
+
+def test_cycles_nested_keaves_acyclic_blocks_out() -> None:
+    """A->B, B<->C, B->D: only {B,C} is a cycle; A and D are NOT flagged."""
+    out = format_plc_query(
+        _cyclic_extraction({"A": ["B"], "B": ["C", "D"], "C": ["B"], "D": []}),
+        "cycles",
+    )
+    assert "B" in out and "C" in out
+    # A and D are acyclic — must not be reported as cycles
+    acyclic = format_plc_query(
+        _cyclic_extraction({"A": ["B"], "B": ["C", "D"], "C": ["B"], "D": []}),
+        "cycles",
+    )
+    # the cycle group is {B,C}; A and D should not appear in a group line
+    assert "A <->" not in acyclic and "<-> A" not in acyclic
+    assert "D <->" not in acyclic and "<-> D" not in acyclic
+
+
+def test_cycles_empty_extraction_is_acyclic() -> None:
+    out = format_plc_query(PlcExtraction(summary=PlcSummary()), "cycles")
+    assert "No call cycles" in out
 
