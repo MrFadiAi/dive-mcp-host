@@ -351,6 +351,28 @@ class ContentHandler:
         return result
 
 
+def _extract_thinking_text(message: AIMessage) -> str:
+    """Extract the text of any Anthropic extended-thinking blocks from a message.
+
+    Extended thinking arrives as content blocks of the form
+    ``{"type": "thinking", "thinking": "<delta>", "signature": "..."}``.
+    ``StrOutputParser`` only emits ``text`` blocks, so without this the model's
+    reasoning is silently discarded mid-stream — the user sees a long pause then
+    the answer, with no visible reasoning. The caller wraps the result in
+    ``<think>…</think>`` so the FE renders it as a distinct (dimmed) block.
+    """
+    content = getattr(message, "content", None)
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "thinking":
+            text = block.get("thinking")
+            if isinstance(text, str):
+                parts.append(text)
+    return "".join(parts)
+
+
 class ChatProcessor:
     """Chat processor."""
 
@@ -369,6 +391,9 @@ class ChatProcessor:
         self.dive_host: DiveMcpHost = app.dive_host["default"]
         self._str_output_parser = StrOutputParser()
         self._content_handler = ContentHandler(self.store)
+        # True while an extended-thinking <think> block is open in the stream.
+        # Reset per query in _handle_response.
+        self._think_open = False
         self.disable_dive_system_prompt = (
             app.model_config_manager.full_config.disable_dive_system_prompt
             if app.model_config_manager.full_config
@@ -906,7 +931,23 @@ class ChatProcessor:
 
     async def _stream_text_msg(self, message: AIMessage) -> None:
         content = await self._content_handler.invoke(message)
+        # Extended-thinking reasoning arrives as content blocks that
+        # StrOutputParser drops (see _extract_thinking_text). Stream them first,
+        # wrapped in <think>…</think>, so the FE renders the reasoning instead
+        # of showing a silent pause before the answer. Order is guaranteed:
+        # Anthropic emits all thinking deltas before the text deltas.
+        thinking = _extract_thinking_text(message)
+        if thinking:
+            if not self._think_open:
+                await self.stream.write(StreamMessage(type="text", content="<think>"))
+                self._think_open = True
+            await self.stream.write(StreamMessage(type="text", content=thinking))
         if content:
+            if self._think_open:
+                await self.stream.write(
+                    StreamMessage(type="text", content="</think>\n\n")
+                )
+                self._think_open = False
             await self.stream.write(StreamMessage(type="text", content=content))
         # Check for truncation — different providers use different keys/values:
         #   OpenAI: finish_reason="length"
@@ -997,6 +1038,7 @@ class ChatProcessor:
         values_messages: list[BaseMessage] = []
         current_messages: list[BaseMessage] = []
         time_to_first_token: float = 0.0
+        self._think_open = False
         async for res_type, res_content in response:
             if res_type == "messages":
                 message, _ = res_content

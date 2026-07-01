@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated, Literal, Self
+from typing import Annotated, Any, Literal, Self
 
 from httpx import AsyncClient, Client
 from pydantic import (
@@ -117,6 +117,12 @@ class LLMConfig(BaseLLMConfig):
             "model_provider",
             "model",
             "tools_in_prompt",
+            # UI/state-only fields that must never be forwarded to the provider
+            # API (langchain would otherwise push them into model_kwargs and
+            # they'd be sent on every request — harmless on z.ai but sloppy and
+            # can mask real param errors on stricter providers).
+            "active",
+            "checked",
         }
         if self.model_provider == "anthropic" and self.max_tokens is None:
             exclude.add("max_tokens")
@@ -233,6 +239,11 @@ class LLMAnthropicConfig(LLMConfig):
 
     model_provider: Literal["anthropic"] = "anthropic"
 
+    thinking: dict[str, Any] | None = Field(default=None)
+    """Extended-thinking config forwarded to ChatAnthropic, e.g.
+    ``{"type": "enabled", "budget_tokens": 16000}``. Defaulted on for models
+    that support it (see :meth:`update_max_tokens`); an explicit value wins."""
+
     @model_validator(mode="after")
     def update_max_tokens(self) -> Self:
         """Update default headers for large tokens."""
@@ -242,12 +253,30 @@ class LLMAnthropicConfig(LLMConfig):
             elif self.model.startswith("claude-3-5"):
                 self.max_tokens = 8129
             else:
-                self.max_tokens = 4096
+                # Modern models routed through the anthropic provider (z.ai's
+                # GLM family like "glm-5.2", Claude 4, …) support large output.
+                # The old 4096 default truncated agentic responses far below
+                # what the model can produce; 128000 matches Claude Code and is
+                # accepted by z.ai's glm-5.2 (verified). The >64000 branch below
+                # auto-adds the output-128k beta header.
+                self.max_tokens = 128000
         if self.max_tokens > 64000:  # noqa: PLR2004
             if self.default_headers is None:
                 self.default_headers = {}
             if "anthropic-beta" not in self.default_headers:
                 self.default_headers["anthropic-beta"] = "output-128k-2025-02-19"
+        # Enable extended thinking by default for non-Claude models routed
+        # through this provider — notably z.ai's GLM family (e.g. glm-5.2).
+        # This mirrors Claude Code (effortLevel: high) and is the concrete
+        # difference between "fast/shallow" and "slow/deep" on the SAME model
+        # (auth/provider make no difference on z.ai — verified). Excluded:
+        # claude-* (claude-3-5 has no thinking support; claude-3-7+ already
+        # get a budget via the frontend's model-parameter UI). Verified on z.ai:
+        # thinking + tool_use + temperature/top_p all coexist (200). An explicit
+        # thinking= in the config always wins.
+        if self.thinking is None and not self.model.lower().startswith("claude-"):
+            budget = min(16000, max(1024, self.max_tokens - 4096))
+            self.thinking = {"type": "enabled", "budget_tokens": budget}
         return self
 
 

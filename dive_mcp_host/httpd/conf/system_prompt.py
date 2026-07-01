@@ -159,6 +159,15 @@ def system_prompt(custom_rules: str) -> str:
       - For a TAG overview use list_tag_tables (structured, compact). Reserve
         export_tag_table_xml for when you need the full XML — it can be very
         large and will be truncated.
+      - When a block is reported as know-how-protected, blocked, or returns
+        empty/unreadable source (e.g. just "// Network 1"), do NOT give up, guess,
+        or jump to stripping protection. The fastest safe fix: REMIND THE USER to
+        compile that block (FC/FB) — or the whole project — in TIA Portal, then
+        RE-RUN the extraction. Compiling regenerates the block's data and makes it
+        readable; this typically resolves know-how-protected / data-blocked states
+        without any destructive unlock. Retry the same query after the user compiles;
+        only consider other options (flagging any destructive ones clearly) if a
+        compile-and-retry still fails.
       - Only call tools that are in your actual tool list; never invent
         search/list/xref tool names (calling a missing tool wastes a turn).
       - If you cannot locate the relevant logic after listing blocks, say so —

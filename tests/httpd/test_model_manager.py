@@ -220,3 +220,35 @@ def test_anthropic_model():
         assert (
             manager.current_setting.default_headers is None
         )  # No beta headers for small max_tokens
+        # claude-* models are excluded from the default-thinking rule:
+        # claude-3-5 doesn't support thinking, and claude-3-7+ already get a
+        # budget via the frontend's model-parameter UI.
+        assert manager.current_setting.thinking is None  # type: ignore
+
+    # Non-Claude models routed through the anthropic provider (notably z.ai's
+    # GLM family, e.g. "glm-5.2[1m]") used to fall through to a 4096 default,
+    # which truncated agentic output far below what the model supports. Claude
+    # Code uses 128000 for the same model; z.ai's glm-5.2 accepts max_tokens
+    # 128000 (verified live). The >64000 branch auto-adds the output-128k beta.
+    with tmp_config("glm-5.2[1m]") as anthropic_config:
+        manager = ModelManager(anthropic_config)
+
+        result = manager.initialize()
+        assert result is True
+        assert manager.current_setting
+        assert isinstance(manager.current_setting, LLMAnthropicConfig)
+        assert manager.current_setting.max_tokens == 128000  # type: ignore
+        assert manager.current_setting.default_headers
+        assert (
+            manager.current_setting.default_headers.get("anthropic-beta")
+            == "output-128k-2025-02-19"
+        )
+        # Extended thinking is enabled by default for non-Claude anthropic
+        # models (z.ai's GLM family) — matches Claude Code's effortLevel: high.
+        # This is the difference between "fast/shallow" and "slow/deep" on the
+        # same glm-5.2 model. Verified on z.ai: thinking + tool_use + sampling
+        # all coexist. claude-* models are excluded (see the claude-3-5 case).
+        assert manager.current_setting.thinking == {  # type: ignore
+            "type": "enabled",
+            "budget_tokens": 16000,
+        }

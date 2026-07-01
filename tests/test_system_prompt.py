@@ -124,3 +124,19 @@ def test_main_system_prompt_forbids_open_project_when_one_open() -> None:
     assert (
         "another project" in out or "already open" in out or "only one project" in out
     ), "system prompt must warn against open_project when a project is already open"
+
+
+def test_main_system_prompt_tells_user_to_compile_blocked_blocks() -> None:
+    """The user found that when a block is reported know-how-protected / blocked /
+    reads empty (e.g. just '// Network 1'), COMPILING that block (or the project) in
+    TIA Portal makes it extractable -- the AI then reads it on retry. The prompt must
+    teach the AI this workflow: hit a protected/blocked/empty block -> tell the user
+    to compile, then retry (not give up, guess, or strip protection)."""
+    out = system_prompt("").lower()
+    assert "compile" in out, (
+        "prompt must tell the AI to suggest compiling blocked/protected blocks"
+    )
+    assert "know-how" in out or "blocked" in out or "protected" in out
+    assert "retry" in out or "re-run" in out, (
+        "prompt must say to retry after compiling"
+    )

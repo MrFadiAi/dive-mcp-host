@@ -176,3 +176,78 @@ async def test_content_handler_gemini_image_with_local_file():
         md5_hash = md5(b"XXXXXXXX", usedforsecurity=False).hexdigest()
         assert md5_hash in content_handler._cache
         assert content_handler._cache[md5_hash] == [f.name]
+
+
+class _CapturingStream(EventStreamContextManager):
+    """Stream that records text messages for assertions."""
+
+    def __init__(self) -> None:
+        self.texts: list[str] = []
+
+    async def write(self, *args: Any, **kwargs: Any) -> None:
+        msg = args[0] if args else None
+        if msg is not None and getattr(msg, "type", None) == "text":
+            self.texts.append(msg.content)
+
+
+def test_extract_thinking_text():
+    """Anthropic extended-thinking blocks are extracted; other content ignored."""
+    from dive_mcp_host.httpd.routers.utils import _extract_thinking_text
+
+    thinking_msg = AIMessage(
+        content=[
+            {"type": "thinking", "thinking": "hello ", "signature": "x"},
+            {"type": "text", "text": "ans"},
+        ]
+    )
+    assert _extract_thinking_text(thinking_msg) == "hello "
+    # text-only message -> no thinking
+    assert (
+        _extract_thinking_text(AIMessage(content=[{"type": "text", "text": "ans"}]))
+        == ""
+    )
+    # plain string content -> no thinking
+    assert _extract_thinking_text(AIMessage(content="plain")) == ""
+
+
+@pytest.mark.asyncio
+async def test_stream_text_msg_wraps_thinking():
+    """Extended-thinking reasoning streams wrapped in <think>...</think>, ahead
+    of the answer. Without this, StrOutputParser drops the reasoning and the
+    user sees only a long pause then the answer.
+
+    Uses a mock app (no live server) so it runs without the server fixture."""
+    from types import SimpleNamespace
+
+    app = SimpleNamespace(
+        store=StoreManager(),
+        dive_host={"default": None},
+        model_config_manager=SimpleNamespace(full_config=None),
+    )
+    state = State()
+    state.dive_user = {"user_id": "default"}
+    stream = _CapturingStream()
+    processor = ChatProcessor(app, state, stream, SkillManager())
+
+    # Two thinking deltas, then the answer (mirrors Anthropic's stream order).
+    await processor._stream_text_msg(
+        AIMessage(
+            content=[{"type": "thinking", "thinking": "reasoning ", "signature": "a"}]
+        )
+    )
+    await processor._stream_text_msg(
+        AIMessage(content=[{"type": "thinking", "thinking": "here", "signature": "a"}])
+    )
+    await processor._stream_text_msg(
+        AIMessage(content=[{"type": "text", "text": "answer"}])
+    )
+
+    joined = "".join(stream.texts)
+    assert "<think>" in joined
+    assert "reasoning here" in joined
+    assert "</think>" in joined
+    assert "answer" in joined
+    # Ordering: think opens before the reasoning, closes before the answer.
+    assert joined.index("<think>") < joined.index("reasoning")
+    assert joined.index("reasoning") < joined.index("</think>")
+    assert joined.index("</think>") < joined.index("answer")
