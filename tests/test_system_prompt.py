@@ -140,3 +140,50 @@ def test_main_system_prompt_tells_user_to_compile_blocked_blocks() -> None:
     assert "retry" in out or "re-run" in out, (
         "prompt must say to retry after compiling"
     )
+
+
+def test_main_system_prompt_prefers_query_for_block_reads() -> None:
+    """A production vision-system debug chat re-read the SAME FC 6 times via the
+    raw ``get_block_content`` (full VAR sections + S7_MLC noise on every call),
+    bloating input to ~306k tokens and forcing compaction that dropped the exact
+    lines under debug — which fed 5 silent 'root cause' revisions across two
+    sessions. The prompt must steer block-source reads to the cheap path:
+    ``extract_plc_blocks`` once, then ``query_plc_blocks(detail='block')``."""
+    out = system_prompt("").lower()
+    assert "detail='block'" in out, (
+        "prompt must steer block-source reads to query_plc_blocks(detail='block')"
+    )
+    assert "floods context" in out or "compaction" in out, (
+        "prompt must warn that repeated raw get_block_content floods context"
+    )
+
+
+def test_guide_mode_treats_root_cause_as_hypothesis() -> None:
+    """The same chat declared a fix '✅ Perfect / bulletproof / I see EXACTLY'
+    from static code, then reversed the root cause 5 times as each fix failed —
+    performative confidence that erodes trust. Guide mode must frame a root
+    cause as a hypothesis until the user's test confirms it, and ban the
+    'verified / perfect / bulletproof' victory language before that."""
+    out = guide_mode_instructions().lower()
+    assert "hypothesis" in out, (
+        "guide mode must frame a root cause as a hypothesis pending the user's test"
+    )
+    assert "bulletproof" in out or "perfect" in out or "verified" in out, (
+        "guide mode must call out performative 'verified/perfect/bulletproof' confidence"
+    )
+
+
+def test_guide_mode_requires_reextract_after_reported_failure() -> None:
+    """After a fix failed, the AI prescribed a NEW root cause without re-reading
+    the current code or explaining why the prior hypothesis was wrong — the user
+    had to ask 'did you extract the last code before you decided?'. Guide mode
+    must require: re-extract the current code, explain in one line why the
+    previous hypothesis was wrong, and reproduce the REPORTED symptom (not a
+    generic one) before re-prescribing."""
+    out = guide_mode_instructions().lower()
+    assert "re-extract" in out or "current code" in out, (
+        "guide mode must require re-extracting current code after a reported failure"
+    )
+    assert "hypothesis was wrong" in out, (
+        "guide mode must require explaining why the prior root cause was wrong"
+    )

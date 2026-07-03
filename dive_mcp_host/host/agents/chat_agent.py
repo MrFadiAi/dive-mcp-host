@@ -587,13 +587,23 @@ class ChatAgentFactory(AgentFactory[AgentState]):
 
         ordered = tool_call_order(state["messages"])
 
-        if max_input_tokens is None or oversize_policy is None:
+        if oversize_policy is None:
             return cast(AgentState, {"messages": ordered})
 
-        if oversize_policy == "summarize" and context_window:
-            # Summarization-based compaction: keep a summary of old messages
+        if oversize_policy == "summarize":
+            # Summarization-based compaction budgets against context_window
+            # (compact_conversation derives its own budget from it) and does NOT
+            # use max_input_tokens. The live chat launcher wires oversize_policy
+            # + context_window but not max_input_tokens, so gating summarize on
+            # max_input_tokens silently disabled compaction for every real chat.
+            if not context_window:
+                return cast(AgentState, {"messages": ordered})
+            # Summarize the FULL conversation, not `ordered`: tool_call_order
+            # returns only a tool-call-pairing DELTA (empty for a well-formed
+            # conversation with no orphaned tool calls), so compacting `ordered`
+            # would compact nothing and compaction would never fire.
             result = await compact_conversation(
-                ordered,
+                state["messages"],
                 self._model,
                 context_window=context_window,
             )
@@ -607,7 +617,7 @@ class ChatAgentFactory(AgentFactory[AgentState]):
                 # Build the state update: remove old messages, add summary + recent
                 remove_messages = [
                     RemoveMessage(id=m.id)  # type: ignore
-                    for m in ordered
+                    for m in state["messages"]
                     if m not in result.messages
                 ]
                 new_messages: list[BaseMessage] = []
@@ -620,6 +630,8 @@ class ChatAgentFactory(AgentFactory[AgentState]):
             return cast(AgentState, {"messages": ordered})
 
         if oversize_policy == "window":
+            if max_input_tokens is None:
+                return cast(AgentState, {"messages": ordered})
             messages: list[BaseMessage] = trim_messages(
                 state["messages"],
                 max_tokens=max_input_tokens,

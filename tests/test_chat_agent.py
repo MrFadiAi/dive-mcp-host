@@ -50,6 +50,32 @@ async def test_chat_agent(agent: ChatAgentFactory):
     assert end_state["messages"][-1].content == "I am a fake model."
 
 
+@pytest.mark.asyncio
+async def test_summarize_compaction_fires_without_max_input_tokens():
+    """Regression: compaction NEVER fired in production (real chats climbed to
+    306k tokens with zero drops) for two reasons — (1) the summarize path was
+    gated on max_input_tokens, which the chat launcher never passes, and (2) it
+    compacted `ordered` (tool_call_order's tool-call-pairing DELTA), which is
+    empty for any well-formed conversation. Both are fixed here: summarize needs
+    only oversize_policy + context_window, and compacts the full state messages.
+    """
+    model = FakeMessageToolModel(responses=[AIMessage(content="compaction summary")])
+    agent = ChatAgentFactory(model=model, tools=[])
+
+    # A well-formed conversation (no orphaned tool calls) large enough to exceed
+    # a tiny context window's 80% compaction threshold.
+    messages = [HumanMessage(content="hello world " * 80), AIMessage(content="ack " * 80)] * 20
+    messages.append(HumanMessage(content="last human message"))
+    state = {"messages": messages}
+    config = {"configurable": {"oversize_policy": "summarize", "context_window": 200}}
+
+    result_state = await agent._before_agent(state, config)
+    # Compaction fired → a SystemMessage summary was prepended.
+    assert any(m.type == "system" for m in result_state["messages"]), (
+        "summarize compaction must fire without max_input_tokens"
+    )
+
+
 def test_complete_tool_calls():
     """Test the complete_tool_calls function."""
     messages = [

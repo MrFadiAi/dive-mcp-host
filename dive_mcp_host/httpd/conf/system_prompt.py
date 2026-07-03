@@ -156,6 +156,14 @@ def system_prompt(custom_rules: str) -> str:
         run extract_plc_blocks(export_dir) -> query_plc_blocks(cache_key,
         detail='search', name='<keyword>') or detail='tag'. For tag-to-HMI
         tracing use trace_tag.
+      - To READ a block's source — especially before prescribing a change, or
+        more than once in a chat — prefer extract_plc_blocks(export_dir) once,
+        then query_plc_blocks(cache_key, detail='block', name='<block>'): it
+        returns clean reconstructed source (size-capped, no per-line S7_MLC
+        noise). Reserve the raw get_block_content for a single first look.
+        Re-calling get_block_content 3+ times floods context (full VAR sections
+        + MLC annotations every call) and forces compaction that drops the
+        exact lines you are debugging.
       - For a TAG overview use list_tag_tables (structured, compact). Reserve
         export_tag_table_xml for when you need the full XML — it can be very
         large and will be truncated.

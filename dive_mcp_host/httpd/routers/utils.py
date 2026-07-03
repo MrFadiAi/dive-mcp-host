@@ -874,6 +874,11 @@ class ChatProcessor:
         def _prompt_cb(_: Any) -> list[BaseMessage]:
             return messages
 
+        # Pick up rules-file edits made outside the UI (manual edits, syncs, or
+        # a file that wasn't current at backend startup) so the cached system
+        # prompt never goes stale between Save/restart. Cheap stat() per chat.
+        self.app.prompt_config_manager.refresh_if_changed()
+
         prompt: str | Callable[..., list[BaseMessage]] | None = None
         if any(isinstance(m, SystemMessage) for m in messages):
             prompt = _prompt_cb

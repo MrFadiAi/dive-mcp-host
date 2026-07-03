@@ -1,6 +1,7 @@
 import os
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -140,6 +141,41 @@ class TestPromptManager:
             system_prompt_text = manager.get_prompt("system")
             assert system_prompt_text is not None
             assert "Env rules have precedence" in system_prompt_text
+
+    def test_refresh_if_changed_reloads_on_file_mtime_change(
+        self, mock_custom_rules_file
+    ):
+        """refresh_if_changed re-reads the rules file when its mtime changes —
+        without needing an explicit update_prompts() (the UI Save) or a restart.
+        This is the fix for stale cached rules: the file becomes the single
+        source of truth, refreshed per chat."""
+        manager = PromptManager(mock_custom_rules_file)
+        manager.initialize()
+        assert "Test custom rules content" in manager.get_prompt(PromptKey.SYSTEM)
+
+        # Simulate editing the file: new content + a bumped mtime.
+        Path(mock_custom_rules_file).write_text("CHANGED rules content")
+        bumped = SimpleNamespace(st_mtime=999999.0)
+        with patch.object(Path, "stat", return_value=bumped):
+            assert manager.refresh_if_changed() is True
+
+        # The cached system prompt now reflects the edited file.
+        assert "CHANGED rules content" in manager.get_prompt(PromptKey.SYSTEM)
+        assert "Test custom rules content" not in manager.get_prompt(PromptKey.SYSTEM)
+
+        # Same mtime again -> no refresh.
+        with patch.object(Path, "stat", return_value=bumped):
+            assert manager.refresh_if_changed() is False
+
+    def test_refresh_if_changed_noop_when_env_sourced(self):
+        """Env-sourced rules are static for the process lifetime — there's no
+        file to watch, so refresh_if_changed is a no-op (and never clobbers env
+        rules with a stale file)."""
+        with patch.dict(os.environ, {"DIVE_CUSTOM_RULES_CONTENT": "env rules"}):
+            manager = PromptManager()
+            manager.initialize()
+            assert manager.refresh_if_changed() is False
+            assert "env rules" in manager.get_prompt(PromptKey.SYSTEM)
 
 
 # Integration tests

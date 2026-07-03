@@ -37,6 +37,11 @@ class PromptManager:
         self.custom_rules_path = custom_rules_path or str(
             DIVE_CONFIG_DIR / "custom_rules"
         )
+        # Signature of the rules source last loaded into the cache, so
+        # refresh_if_changed can detect on-disk edits without a UI save.
+        # "env" = DIVE_CUSTOM_RULES_CONTENT (static for the process lifetime);
+        # ("file", mtime) = file source; "missing" = no file.
+        self._rules_sig: object = None
 
     def initialize(self) -> None:
         """Initialize the PromptManager."""
@@ -50,6 +55,39 @@ class PromptManager:
         else:
             self.prompts[PromptKey.SYSTEM] = system_prompt("")
             self.prompts[PromptKey.CUSTOM] = ""
+        self._rules_sig = self._rules_signature()
+
+    def _rules_signature(self) -> object:
+        """A value that changes when the rules source changes.
+
+        Env-sourced rules (``DIVE_CUSTOM_RULES_CONTENT``) are static for the
+        process lifetime, so they collapse to a constant marker. File-sourced
+        rules are tracked by mtime (and creation/deletion via ``"missing"``).
+        """
+        if os.environ.get("DIVE_CUSTOM_RULES_CONTENT") is not None:
+            return "env"
+        try:
+            return ("file", Path(self.custom_rules_path).stat().st_mtime)
+        except OSError:
+            return "missing"
+
+    def refresh_if_changed(self) -> bool:
+        """Re-read custom_rules from disk if the source changed since last load.
+
+        The system prompt is otherwise cached at startup and only refreshed by
+        ``update_prompts`` (the Custom Instructions Save button) or a restart —
+        so editing the rules file outside the UI left the AI using stale rules.
+        Calling this before each chat makes the file the single source of truth.
+
+        Returns:
+            True if the cache was refreshed, False if it was already current.
+        """
+        sig = self._rules_signature()
+        if sig == self._rules_sig:
+            return False
+        self._rules_sig = sig
+        self.update_prompts()
+        return True
 
     def set_prompt(self, key: str, prompt: str) -> None:
         """Set a prompt by key.

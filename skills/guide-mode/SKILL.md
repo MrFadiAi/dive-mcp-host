@@ -36,9 +36,9 @@ The worker has NO reliable native code-search — do not call or invent search/l
 
 **If a block reads empty, blocked, or is reported know-how-protected** (e.g. `get_block_content` returns only `// Network 1`): do NOT guess or give up — and don't jump to stripping protection. **Tell the user to compile that block (FC/FB) — or the whole project — in TIA Portal, then re-run the read.** Compiling regenerates the block's data and typically makes it readable without any destructive unlock. Retry after the user compiles.
 
-**Reading detail:**
-- **get_block_content** — read a block's full source code
-- **read_block_interface** — read a block's parameter interface
+**Reading detail:** For a block's source, the cheap path is one export → `extract_plc_blocks` → `query_plc_blocks(detail='block', name='<block>')` (clean reconstructed source, size-capped, no S7_MLC noise). Use the raw **get_block_content** for a single first look — but do NOT re-call it repeatedly: every call re-dumps the full VAR sections + MLC annotations and floods context, and compaction will drop the exact lines you are debugging. If you are re-checking a block the user just changed, re-extract the CURRENT code; never reason from your memory of an earlier version.
+- **get_block_content** — a block's full raw source (first look only)
+- **read_block_interface** — a block's parameter interface
 - **browse_hmi_screens** — HMI screens
 - **get_tia_version** / **worker_status** — version + worker health
 
@@ -83,7 +83,11 @@ Build a table and walk it the way the PLC actually scans it — one row per cycl
 
 Only prescribe a fix once your trace reproduces the symptom AND the proposed change resolves it when you re-simulate. When you present the diagnosis, include the trace (or a condensed version) so the user can verify your reasoning — and call out any place where the fix depends on behavior you're inferring (e.g. "this assumes the Vision PC holds `AANTAL_NIEUW` high until the next scan — confirm that").
 
+**When the user reports your fix did NOT work, do not jump to a new root cause.** Re-extract the block and read the CURRENT code — your previous reasoning was against an older version, and one of its assumptions is now wrong. State in one line *why* the previous hypothesis was wrong (e.g. "I assumed `INDEXNUMBER` counted 1..N, but it actually holds the batch total"), then re-simulate. Only prescribe again once the new trace reproduces the *reported* symptom — not a generic one. If you cannot reproduce it, say so explicitly and ask for the one watch-table value that would disambiguate, rather than prescribing another guess. Five silent revisions of "the root cause" in one chat — each confidently presented as definitive — is the failure mode to avoid.
+
 Also: **read the real exported structure before asserting what exists.** A block call or DB member that "isn't there" may simply have been dropped by the source export/reconstructor — if a tool result looks surprisingly empty (e.g. a `CALL` with no parameters), say "the export didn't show the parameters, can you paste the call?" instead of asserting the parameters are missing.
+
+**Treat every root cause as a hypothesis until the user confirms the fix works.** Never declare a fix "verified", "correct", "perfect", or "bulletproof" from static code alone — the only real verification is the user's test result. Drop the ✅-spam and the "I see EXACTLY what's happening" / "this is bulletproof" language *before* that confirmation: it reads as certainty you have not earned, and it erodes trust when (as often with real-time / PROFINET bugs) the next test contradicts it. Say "this should fix it because <trace>" and let the test speak.
 
 ## Output Format
 
