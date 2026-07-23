@@ -533,7 +533,13 @@ class ChatAgentFactory(AgentFactory[AgentState]):
             if self._tool_classes:
                 model = wrapped_model.bind_tools(self._tool_classes)
             model_runnable = (
-                self._prompt | self._file_msg_converter | self._content_filter | drop_empty_messages | truncate_tool_results | model
+                self._prompt
+                | self._file_msg_converter
+                | self._content_filter
+                | drop_empty_messages
+                | truncate_tool_results
+                | coalesce_system_messages
+                | model
             )
         else:
             model_runnable = (
@@ -544,6 +550,7 @@ class ChatAgentFactory(AgentFactory[AgentState]):
                 | self._content_filter
                 | drop_empty_messages
                 | truncate_tool_results
+                | coalesce_system_messages
                 | InterruptableModel(
                     model=self._model,
                     abort_signal=abort_signal,
@@ -753,6 +760,45 @@ def get_chat_agent_factory(
         store=store,
         skill_manager=skill_manager,
     )
+
+
+@RunnableCallable
+def coalesce_system_messages(
+    inpt: ChatPromptValue | list[BaseMessage],
+) -> list[BaseMessage]:
+    """Merge every SystemMessage into a single one at the front of the list.
+
+    Anthropic rejects a message list with more than one SystemMessage unless
+    they are all consecutive at the start — it raises "Received multiple
+    non-consecutive system messages". Auto-compaction stores its summary as a
+    SystemMessage, but langgraph's ``add_messages`` reducer appends new-id
+    messages at the END of state (while keeping existing-id messages in place),
+    so the summary lands after the Human/AI messages. Together with the system
+    prompt prepended at call time, that yields two non-consecutive
+    SystemMessages and crashes the query.
+
+    This coalesces all SystemMessages into one at index 0 — content merged in
+    original order — so the stream is always provider-valid. It also rescues
+    threads already broken this way (their next turn no longer crashes). A list
+    with zero or one SystemMessage is returned unchanged.
+    """
+    messages = inpt.to_messages() if isinstance(inpt, ChatPromptValue) else inpt
+
+    system_indices = [i for i, m in enumerate(messages) if isinstance(m, SystemMessage)]
+    if len(system_indices) <= 1:
+        return messages
+
+    def _as_text(content: str | list) -> str:
+        if isinstance(content, str):
+            return content
+        return "".join(
+            block.get("text", "") if isinstance(block, dict) else str(block)
+            for block in content
+        )
+
+    merged = "\n\n".join(_as_text(messages[i].content) for i in system_indices)
+    non_system = [m for m in messages if not isinstance(m, SystemMessage)]
+    return [SystemMessage(content=merged), *non_system]
 
 
 @RunnableCallable

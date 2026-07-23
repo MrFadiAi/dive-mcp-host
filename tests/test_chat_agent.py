@@ -1,7 +1,11 @@
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
-from dive_mcp_host.host.agents.chat_agent import ChatAgentFactory, complete_tool_calls
+from dive_mcp_host.host.agents.chat_agent import (
+    ChatAgentFactory,
+    coalesce_system_messages,
+    complete_tool_calls,
+)
 from dive_mcp_host.models.fake import FakeMessageToolModel
 
 
@@ -98,3 +102,76 @@ def test_complete_tool_calls():
         if isinstance(message, ToolMessage)
     }
     assert tool_message_ids == {"tool-1", "tool-2"}
+
+
+def test_coalesce_system_messages_merges_non_consecutive_system_to_single_front_message():
+    """Regression: auto-compaction stores its summary SystemMessage at the END of
+    state (langgraph's add_messages appends new-id messages while keeping
+    existing-id ones in place), so at model-call time the list looks like
+    [System(prompt), ...humans/ais..., System(summary), Human]. Anthropic rejects
+    that as "Received multiple non-consecutive system messages". The pipeline
+    must merge every SystemMessage into a single one at the front.
+    """
+    messages = [
+        SystemMessage(content="You are TIA Agent."),
+        HumanMessage(content="hi", id="1"),
+        AIMessage(content="hello", id="2"),
+        SystemMessage(
+            content="<conversation_summary>earlier turns</conversation_summary>",
+            name="compaction_summary",
+            id="S1",
+        ),
+        HumanMessage(content="continue", id="3"),
+    ]
+
+    result = coalesce_system_messages.invoke(messages)
+
+    # Exactly one SystemMessage, at the front (two were merged into one).
+    assert len(result) == len(messages) - 1
+    assert isinstance(result[0], SystemMessage)
+    assert not any(isinstance(m, SystemMessage) for m in result[1:])
+    # Both system contents merged (prompt text first, then the summary).
+    assert "You are TIA Agent." in result[0].content
+    assert "<conversation_summary>" in result[0].content
+    # Non-system messages keep their original relative order.
+    assert [m.content for m in result if not isinstance(m, SystemMessage)] == [
+        "hi",
+        "hello",
+        "continue",
+    ]
+
+
+def test_coalesce_system_messages_leaves_single_or_no_system_untouched():
+    """A single (or zero) SystemMessage is already provider-valid; don't reshape."""
+    with_system = [SystemMessage(content="sys"), HumanMessage(content="hi", id="1")]
+    result = coalesce_system_messages.invoke(with_system)
+    assert [type(m) for m in result] == [SystemMessage, HumanMessage]
+    assert result[0].content == "sys"
+
+    no_system = [HumanMessage(content="hi", id="1"), AIMessage(content="yo", id="2")]
+    assert coalesce_system_messages.invoke(no_system) == no_system
+
+
+def test_coalesce_system_messages_prevents_anthropic_non_consecutive_error():
+    """The exact production error must no longer be raised once coalesced.
+
+    Reproduces the failing shape (prompt + stray compaction summary) and asserts
+    Anthropic's message formatter accepts it instead of raising
+    "Received multiple non-consecutive system messages".
+    """
+    from langchain_anthropic.chat_models import _format_messages
+
+    messages = [
+        SystemMessage(content="SYSTEM_PROMPT"),
+        HumanMessage(content="hi", id="1"),
+        AIMessage(content="yo", id="2"),
+        SystemMessage(content="<summary>", name="compaction_summary", id="S1"),
+        HumanMessage(content="continue", id="3"),
+    ]
+
+    coalesced = coalesce_system_messages.invoke(messages)
+
+    # Must not raise.
+    system, formatted = _format_messages(coalesced)
+    assert system is not None  # merged system content survived at the top level
+    assert len(formatted) == 3  # the three non-system messages
