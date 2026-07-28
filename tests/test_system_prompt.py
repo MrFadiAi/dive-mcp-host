@@ -66,6 +66,32 @@ def test_guide_mode_forbids_fabricating_answers() -> None:
     assert "fabricate" in out or "cannot find" in out or "say so" in out
 
 
+def test_guide_mode_bans_unearned_completeness_claims() -> None:
+    """Regression (chat 34e9a170, 2026-07-23): asked "what happens when
+    KETTING_START_PULS = 1?", the agent wrote "the complete picture" after
+    reading 3 of 47 matches for one of the signals. The skill must forbid
+    completeness claims unless EVERY match was read, and make the agent state
+    how many matches it actually checked."""
+    out = guide_mode_instructions().lower()
+    assert "complete picture" in out, (
+        "skill must name the banned phrase 'complete picture'"
+    )
+    assert "every match" in out or "of 47" in out, (
+        "skill must tell the agent to state how many matches it read vs exist"
+    )
+
+
+def test_main_system_prompt_bans_unearned_completeness_claims() -> None:
+    """The no-overclaim rule must hold in the always-on prompt too — guide mode
+    may be OFF during a normal analysis chat, so the rule can't live only in
+    the guide-mode skill."""
+    out = system_prompt("").lower()
+    assert "complete picture" in out, (
+        "main prompt must ban 'the complete picture'"
+    )
+    assert "fabricat" in out, "main prompt must keep the no-fabrication rule"
+
+
 def test_main_system_prompt_does_not_advertise_broken_tools() -> None:
     """The main (non-guide) system prompt must also avoid the broken names."""
     out = system_prompt("")
