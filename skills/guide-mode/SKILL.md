@@ -41,7 +41,7 @@ Use these read-only tools (all confirmed to exist on the TIA Portal worker):
 - **list_tag_tables** / **export_tag_table_xml** — read tag tables and their tags
 
 **Locating logic (where is a signal/keyword/tag used?):**
-The worker has NO reliable native code-search — do not call or invent search/list/xref tool names that are not listed here. Use one of these WORKING approaches instead:
+The worker has NO reliable native code-search — do not call or invent search/list/xref tool names that are not listed here. **Always scope the search to the exact plcName** once the target PLC is known — an unscoped search_code sweeps every PLC in every open project (thousands of blocks, ~100 s) when one PLC answers in seconds; and verify a match's plcName matches the scoped PLC before reading blocks from it. Use one of these WORKING approaches instead:
 - **browse_project_tree** (scoped to the exact PLC) to list blocks, then **get_block_content** on the candidates. Verify each PLC name — the `plcName` filter can return the wrong PLC.
 - For a real grep across ALL block code: export the PLC's program blocks to a folder, then **extract_plc_blocks(export_dir)** → **query_plc_blocks(cache_key, detail='search', name='<keyword>')** (matching blocks + lines) or **detail='tag', name='<tag>'** (which blocks read/write a tag). **trace_tag** connects PLC tag usage to HMI screens.
 

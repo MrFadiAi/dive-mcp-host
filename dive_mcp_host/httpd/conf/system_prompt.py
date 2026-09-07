@@ -190,6 +190,12 @@ def system_prompt(custom_rules: str) -> str:
         run extract_plc_blocks(export_dir) -> query_plc_blocks(cache_key,
         detail='search', name='<keyword>') or detail='tag'. For tag-to-HMI
         tracing use trace_tag.
+      - ALWAYS pass the exact plcName to search_code / find_tags once the
+        target PLC is known (from the user's message or list_plcs). An
+        unscoped search sweeps EVERY PLC in EVERY open project (thousands of
+        blocks, ~100 s) when one PLC (~150 blocks) answers in seconds. Never
+        read a block from a PLC the user did not name — check the match's
+        plcName matches the scoped PLC first.
       - To READ a block's source — especially before prescribing a change, or
         more than once in a chat — prefer extract_plc_blocks(export_dir) once,
         then query_plc_blocks(cache_key, detail='block', name='<block>'): it

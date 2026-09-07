@@ -23,12 +23,14 @@ from dive_mcp_host.httpd.conf.system_prompt import (
 # is the canonical PLC-name source (its `deviceName`), and the prompt deliberately
 # references it. Re-add a name here ONLY if a future live chat shows it erroring.
 BROKEN_TOOLS = [
-    "find_tags",
-    "search_code",
     "tag_xref",
     "tag_usage",
     "read_cross_references",
 ]
+# NOTE (2026-09-07): `find_tags` and `search_code` were REMOVED from this list —
+# live chat 2026-09-07 confirmed both WORK on the current worker (search_code
+# returned 113 matches scoped / find_tags returned tag rows). The prompts now
+# deliberately reference them for plcName-scoped searches.
 
 # The WORKING code-search path (Python host tools, cycles 21-31) that the prompts
 # must steer the AI toward instead.
@@ -226,3 +228,14 @@ def test_guide_mode_requires_reextract_after_reported_failure() -> None:
     assert "hypothesis was wrong" in out, (
         "guide mode must require explaining why the prior root cause was wrong"
     )
+
+
+def test_prompts_require_plcname_scoped_searches() -> None:
+    """Regression (chat 2026-09-07): the agent's opening volley ran an
+    UNSCOPED search_code that swept every PLC in every open project (2000
+    blocks, ~100 s) although the target PLC was known, then read a block from
+    the wrong PLC first (matches were mislabeled). Both prompts must demand
+    scoping searches to the exact plcName and verifying match plcNames."""
+    for out in (system_prompt("").lower(), guide_mode_instructions().lower()):
+        assert "unscoped" in out, "prompts must warn against unscoped searches"
+        assert "plcname" in out, "prompts must name the plcName scoping rule"
