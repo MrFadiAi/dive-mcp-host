@@ -92,6 +92,19 @@ def test_main_system_prompt_bans_unearned_completeness_claims() -> None:
     assert "fabricat" in out, "main prompt must keep the no-fabrication rule"
 
 
+def test_prompts_require_verbatim_code_no_invented_placeholders() -> None:
+    """Regression (chat 2026-09-07, FC PUTBAND): the extractor had dropped STL
+    jump labels, and the agent "repaired" the gaps by echoing the code with
+    invented '(skip)'/'(end)' placeholders plus inline commentary — the user
+    couldn't tell real code from invention. BOTH prompts must force a verbatim
+    code echo and an explicit "extraction incomplete" stop instead."""
+    for out in (system_prompt("").lower(), guide_mode_instructions().lower()):
+        assert "verbatim" in out, "prompts must demand verbatim code echo"
+        assert "(skip)" in out, (
+            "prompts must name the banned placeholder '(skip)' concretely"
+        )
+
+
 def test_main_system_prompt_does_not_advertise_broken_tools() -> None:
     """The main (non-guide) system prompt must also avoid the broken names."""
     out = system_prompt("")
