@@ -366,12 +366,18 @@ async def execute_bash(
         else:
             process = await asyncio.create_subprocess_shell(
                 command,
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=working_dir,
                 env={**os.environ},
                 start_new_session=True,  # Create new process group for proper cleanup
             )
+            # stdin=DEVNULL: a command whose quoting got mangled by the shell
+            # (e.g. nested quotes around `python -c "…"`) can leave a bare
+            # REPL waiting on stdin — inherited stdin then hangs until the
+            # tool timeout (production: a 4m27s "empty output, exit 0" call).
+            # EOF on stdin makes such processes exit immediately instead.
 
             try:
                 # Monitor abort signal during command execution

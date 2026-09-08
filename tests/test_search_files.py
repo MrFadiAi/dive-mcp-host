@@ -158,3 +158,32 @@ async def test_search_files_tool_default_has_no_context(tmp_path: Path) -> None:
     )
     assert "a.txt:2: TARGET" in result
     assert "| p" not in result  # no context markers
+
+
+def test_search_files_accepts_a_single_file_as_root(tmp_path: Path) -> None:
+    """Regression (chat 2026-09-08): pointing search_files AT a file returned
+    "No matches" — os.walk on a file path yields nothing, so the agent fell
+    back to bash+grep for TIA's .rdf screen scripts. A file root must search
+    THAT file."""
+    f = tmp_path / "screen_38.rdf"
+    f.write_bytes(b"junk\nSetBitInTag(\"DB_HMI_KNOPPEN_HOLD_TO_RUN\", 0);\njunk\n")
+
+    matches = _search_files(str(f), "KNOPPEN_HOLD_TO_RUN")
+    assert len(matches) == 1
+    assert matches[0]["file"] == "screen_38.rdf"
+    assert matches[0]["line"] == 2
+
+
+def test_search_files_binary_tolerant_matches_in_undecodable_files(tmp_path: Path) -> None:
+    """Regression (chat 2026-09-08): TIA .rdf screen files carry non-UTF-8
+    bytes; ASCII identifiers inside them must still match (grep -a parity —
+    decoding must be lossless, not drop bytes)."""
+    f = tmp_path / "screen.rdf"
+    f.write_bytes(b"\x00\x9f\xefKNOPPEN_HOLD_TO_RUN\x9fTAIL\nplain line\n")
+
+    matches = _search_files(str(tmp_path), "KNOPPEN_HOLD_TO_RUN")
+    assert len(matches) == 1
+    # A pattern SPANNING a dropped byte must NOT falsely match:
+    # errors="ignore" splices RUN+TAIL into "RUNTAIL"; a lossless
+    # byte->char map keeps them apart.
+    assert _search_files(str(tmp_path), "RUNTAIL") == []

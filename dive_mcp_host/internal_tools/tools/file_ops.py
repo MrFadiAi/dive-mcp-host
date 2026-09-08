@@ -120,7 +120,23 @@ async def read_file(
         elif not file_path.is_file():
             result = f"Error: Not a file: {path}"
         else:
-            content = file_path.read_text(encoding=encoding)
+            try:
+                content = file_path.read_text(encoding=encoding)
+                replaced_notice = ""
+            except UnicodeError:
+                # Binary/mixed-encoding file (production case: TIA's .rdf HMI
+                # screen scripts carry non-UTF-8 bytes next to ASCII). Read
+                # with replacement instead of failing so the readable
+                # fragments survive, and say so — undecodable spots show as
+                # U+FFFD, and search_files is the better tool for such files.
+                raw = file_path.read_bytes()
+                content = raw.decode("utf-8", errors="replace")
+                n_replaced = content.count("�")
+                replaced_notice = (
+                    f"\n\n[read_file] {n_replaced} undecodable byte(s) replaced "
+                    "with � (binary/mixed-encoding file) — use search_files to "
+                    "match text inside such files reliably."
+                )
 
             # Optional 1-based line range (read a slice of a large file)
             content = _slice_lines(content, start_line, end_line)
@@ -130,6 +146,7 @@ async def read_file(
                 result = content[:100000] + "\n... (truncated)"
             else:
                 result = content
+            result += replaced_notice
 
     # OSError covers filesystem failures; UnicodeError covers binary files
     # read as text (UnicodeDecodeError) and un-encodable content on write;

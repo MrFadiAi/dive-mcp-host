@@ -47,6 +47,12 @@ The worker has NO reliable native code-search — do not call or invent search/l
 
 **If a block reads empty, blocked, or is reported know-how-protected** (e.g. `get_block_content` returns only `// Network 1`): do NOT guess or give up — and don't jump to stripping protection. **Tell the user to compile that block (FC/FB) — or the whole project — in TIA Portal, then re-run the read.** Compiling regenerates the block's data and typically makes it readable without any destructive unlock. Retry after the user compiles.
 
+**Export-inconsistent blocks ("Inconsistent blocks and PLC data types (UDT) cannot be exported"):** when the target PLC's own blocks can't be exported, look for a READABLE sibling copy of the same machine program (projects here are frequently copied per station — same code, same line numbers) and quote from it — but DISCLOSE the substitution prominently, state which blocks remain unverified, and offer the compile-and-diff step ("compile the master, then I'll re-read and byte-diff"). Never silently treat a sibling copy as the master.
+
+**Known dead ends — don't sink time re-deriving them:**
+- `<project>\\XRef\\XRef.db` is TIA's own cross-reference SQLite (tables `addrs/objs/parts/rels`) — the `parts`/name blobs are proprietary binary (`OG…` headers; not zlib/UTF-16) and cannot be decoded. It took a production chat ~10 minutes to establish this. Use find_tags / search_code / tag_usage instead.
+- HMI screen scripts (.rdf) are binary-ish; `read_file` shows replacement chars — search_files matches inside them fine (a direct .rdf file path is a valid search root). No bash+grep needed.
+
 **Reading detail:** For a block's source, the cheap path is one export → `extract_plc_blocks` → `query_plc_blocks(detail='block', name='<block>')` (clean reconstructed source, size-capped, no S7_MLC noise). Use the raw **get_block_content** for a single first look — but do NOT re-call it repeatedly: every call re-dumps the full VAR sections + MLC annotations and floods context, and compaction will drop the exact lines you are debugging. If you are re-checking a block the user just changed, re-extract the CURRENT code; never reason from your memory of an earlier version.
 - **get_block_content** — a block's full raw source (first look only)
 - **read_block_interface** — a block's parameter interface

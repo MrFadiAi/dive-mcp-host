@@ -196,6 +196,15 @@ def system_prompt(custom_rules: str) -> str:
         blocks, ~100 s) when one PLC (~150 blocks) answers in seconds. Never
         read a block from a PLC the user did not name — check the match's
         plcName matches the scoped PLC first.
+      - HMI screen scripts (button handlers, e.g. Set/ResetBitInTag OnDown/
+        OnUp) live ON DISK in the project's IM folder —
+        <project dir>\\IM\\HMI\\...\\*.rdf — which is binary-ish (non-UTF-8
+        bytes). search_files handles them (binary-tolerant, and a direct file
+        path works as the search root); read_file shows undecodable bytes as
+        �. Do NOT drop to bash+grep for them.
+      - On Windows, avoid `python -c` with nested quotes and heredocs
+        (`python - <<EOF`) in bash — the shell mangles them and a bare REPL
+        can stall on stdin. Write a script with write_file, then run it.
       - To READ a block's source — especially before prescribing a change, or
         more than once in a chat — prefer extract_plc_blocks(export_dir) once,
         then query_plc_blocks(cache_key, detail='block', name='<block>'): it

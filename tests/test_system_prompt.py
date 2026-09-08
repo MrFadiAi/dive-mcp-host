@@ -24,13 +24,15 @@ from dive_mcp_host.httpd.conf.system_prompt import (
 # references it. Re-add a name here ONLY if a future live chat shows it erroring.
 BROKEN_TOOLS = [
     "tag_xref",
-    "tag_usage",
     "read_cross_references",
 ]
 # NOTE (2026-09-07): `find_tags` and `search_code` were REMOVED from this list —
 # live chat 2026-09-07 confirmed both WORK on the current worker (search_code
 # returned 113 matches scoped / find_tags returned tag rows). The prompts now
 # deliberately reference them for plcName-scoped searches.
+# NOTE (2026-09-08): `tag_usage` was REMOVED — live-verified working in two
+# chats (2026-09-07 PUTBAND + 2026-09-08 HOLD TO RUN, both returned reference
+# rows with IsError=False). `tag_xref` stays banned (not yet live-verified).
 
 # The WORKING code-search path (Python host tools, cycles 21-31) that the prompts
 # must steer the AI toward instead.
@@ -239,3 +241,26 @@ def test_prompts_require_plcname_scoped_searches() -> None:
     for out in (system_prompt("").lower(), guide_mode_instructions().lower()):
         assert "unscoped" in out, "prompts must warn against unscoped searches"
         assert "plcname" in out, "prompts must name the plcName scoping rule"
+
+
+def test_prompts_teach_hmi_rdf_disk_search_and_bash_pitfall() -> None:
+    """Regression (chat 2026-09-08, HOLD TO RUN analysis): the agent had to
+    invent bash+grep workarounds because (a) HMI screen scripts (.rdf) are
+    binary-ish and read_file failed, (b) nested-quote `python -c` under cmd
+    stalled on stdin. The prompts must carry both lessons."""
+    out = system_prompt("").lower()
+    assert "im" in out and "rdf" in out, (
+        "main prompt must point at the project IM folder for HMI screen scripts"
+    )
+    assert "bash+grep" in out, "main prompt must say NOT to drop to bash+grep"
+    assert "stdin" in out, "main prompt must warn about the python -c stdin stall"
+
+
+def test_guide_mode_teaches_sibling_copy_and_xref_dead_end() -> None:
+    """Regression (chat 2026-09-08): with 42 export-inconsistent blocks the
+    agent substituted readable sibling copies (good, but must be DISCLOSED +
+    paired with compile-and-diff) and burned ~10 min proving XRef.db parts
+    are undecodable. The skill must encode both."""
+    out = guide_mode_instructions().lower()
+    assert "sibling" in out, "skill must teach sibling-copy substitution + disclosure"
+    assert "xref.db" in out, "skill must mark XRef.db parts as a known dead end"

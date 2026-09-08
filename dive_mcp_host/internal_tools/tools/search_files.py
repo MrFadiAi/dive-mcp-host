@@ -45,6 +45,23 @@ _MAX_FILE_BYTES = 2_000_000  # skip files larger than 2 MB (likely binaries/logs
 _MAX_LINE_CHARS = 200  # truncate long matched lines in the output
 
 
+def _read_lines_lossless(fpath: str) -> list[str]:
+    """Read a file's lines without losing bytes to decoding.
+
+    TIA exports binary-ish files (.rdf screen scripts carry non-UTF-8 bytes
+    next to ASCII). ``errors="ignore"`` DROPS those bytes and splices the
+    neighbours, which can both hide and fabricate matches. grep -a parity
+    needs a lossless 1:1 byte→char map: try strict UTF-8 first (exact for
+    real text), fall back to latin-1 (every byte survives) on decode failure.
+    """
+    try:
+        with open(fpath, encoding="utf-8") as fh:
+            return fh.readlines()
+    except UnicodeDecodeError:
+        with open(fpath, encoding="latin-1") as fh:
+            return fh.readlines()
+
+
 def _search_files(
     root: str,
     pattern: str,
@@ -65,9 +82,23 @@ def _search_files(
     root_path = Path(root).expanduser()
     results: list[dict[str, Any]] = []
 
-    for dirpath, dirs, files in os.walk(root_path):
-        dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]
-        for fname in files:
+    # A file path is a valid root: os.walk on a file yields nothing, which
+    # used to turn "search this exact file" into a silent "No matches" (the
+    # agent then fell back to bash+grep for TIA's binary-ish .rdf screens).
+    if root_path.is_file():
+        walk_entries: list[tuple[str, list[str]]] = [
+            (str(root_path.parent), [root_path.name])
+        ]
+        rel_base = root_path.parent
+    else:
+        walk_entries = []
+        for dirpath, dirs, files in os.walk(root_path):
+            dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]
+            walk_entries.append((dirpath, files))
+        rel_base = root_path
+
+    for dirpath, filenames in walk_entries:
+        for fname in filenames:
             if fname.startswith("."):
                 continue
             fpath = os.path.join(dirpath, fname)
@@ -76,8 +107,7 @@ def _search_files(
                     continue
                 # Read the whole (capped) file so we can reach lines before a
                 # match for context. The 2 MB size cap bounds memory.
-                with open(fpath, encoding="utf-8", errors="ignore") as fh:
-                    lines = fh.readlines()
+                lines = _read_lines_lossless(fpath)
             except OSError:
                 continue
             for idx, line in enumerate(lines):
@@ -101,7 +131,7 @@ def _search_files(
                     ]
                     results.append(
                         {
-                            "file": os.path.relpath(fpath, root_path),
+                            "file": os.path.relpath(fpath, rel_base),
                             "line": lineno,
                             "text": line.rstrip("\n")[:_MAX_LINE_CHARS],
                             "before": ctx_before,

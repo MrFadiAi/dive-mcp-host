@@ -28,14 +28,19 @@ async def test_read_file_bad_encoding_returns_clean_error(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_read_file_binary_returns_clean_error(tmp_path: Path) -> None:
-    """Reading a binary file as text raises UnicodeDecodeError (a ValueError,
-    not an OSError). Must return a clean error, not crash the tool."""
-    f = tmp_path / "blob.bin"
+async def test_read_file_binary_reads_with_replacement_and_notice(tmp_path: Path) -> None:
+    """Regression (chat 2026-09-08): read_file FAILED outright on TIA's
+    binary-ish .rdf screen scripts ('utf-8 codec can't decode byte 0x9f'),
+    forcing the agent into bash+grep. Binary/mixed-encoding files must now
+    read with replacement characters plus an explicit notice — not an error."""
+    f = tmp_path / "blob.rdf"
     f.write_bytes(b"\xff\xfe\x00\xfa\xfb this is not utf-8")
 
     result = await read_file.ainvoke({"path": str(f)}, {})
-    assert "Error" in result
+    assert not result.startswith("Error"), "binary read must no longer fail"
+    assert "this is not utf-8" in result  # readable fragment survives
+    assert "�" in result  # undecodable bytes became replacement chars
+    assert "replaced" in result and "search_files" in result  # explicit notice
 
 
 @pytest.mark.asyncio
